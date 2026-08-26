@@ -35,21 +35,41 @@ produced by PostgreSQL/Service instead of a process-local counter.
 
 ## Setup
 
-Create a local database and user (one time):
+Create the local `agenthub` role and set its password (you type it
+interactively — this is what makes password auth in the connection
+strings below work):
 
 ```bash
-createuser --createdb agenthub
-createdb --owner=agenthub agenthub
+createuser --createdb --pwprompt agenthub
 ```
 
-Configure the connection string. Local-only example:
+Create the development database and a dedicated integration test
+database, both owned by that role:
 
 ```bash
-export DATABASE_URL='postgres://agenthub:agenthub@localhost:5432/agenthub?sslmode=disable'
+createdb --owner=agenthub agenthub        # local development data
+createdb --owner=agenthub agenthub_test   # dedicated integration tests
 ```
 
-Do not use `sslmode=disable` outside clearly local setups, and never
-commit credentials.
+- `agenthub` is the local development database used by the server.
+- `agenthub_test` is the dedicated integration test database.
+  Integration tests delete rows from / rebuild the `agents` table
+  inside it.
+- `TEST_DATABASE_URL` must never point at the development or a
+  production database: the test code refuses to run destructive
+  operations against any database whose name does not end with
+  `_test`.
+
+Configure the connection strings with the password you just set —
+replace `<your-password>` below:
+
+```bash
+export DATABASE_URL='postgres://agenthub:<your-password>@localhost:5432/agenthub?sslmode=disable'
+export TEST_DATABASE_URL='postgres://agenthub:<your-password>@localhost:5432/agenthub_test?sslmode=disable'
+```
+
+The examples use `sslmode=disable`, which is only appropriate for local
+development. Never commit real credentials.
 
 ### Migrations
 
@@ -96,10 +116,12 @@ go test ./...
 
 Integration tests exercise PostgresRepository against a real database
 selected only by `TEST_DATABASE_URL`; they skip with a clear message
-when it is unset:
+when it is unset. Before touching anything, the tests verify the
+connected database name ends with `_test` and refuse to run against
+any other database:
 
 ```bash
-export TEST_DATABASE_URL='postgres://agenthub:agenthub@localhost:5432/agenthub_test?sslmode=disable'
+export TEST_DATABASE_URL='postgres://agenthub:<your-password>@localhost:5432/agenthub_test?sslmode=disable'
 go test -v ./internal/agent/ -run TestPostgresRepository
 ```
 

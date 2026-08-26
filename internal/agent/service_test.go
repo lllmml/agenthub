@@ -39,3 +39,66 @@ func TestServiceGetByIDNotFound(t *testing.T) {
 		t.Fatalf("err = %v, want ErrAgentNotFound", err)
 	}
 }
+
+// spyRepository is a minimal Repository fake that records GetByID
+// calls. It lets tests assert the Service does not consult storage for
+// malformed IDs without a mock framework.
+type spyRepository struct {
+	agents   map[string]Agent
+	getCalls []string
+}
+
+var _ Repository = (*spyRepository)(nil)
+
+func newSpyRepository() *spyRepository {
+	return &spyRepository{agents: make(map[string]Agent)}
+}
+
+func (s *spyRepository) Create(ctx context.Context, a Agent) (Agent, error) {
+	s.agents[a.ID] = a
+	return a, nil
+}
+
+func (s *spyRepository) GetByID(ctx context.Context, id string) (Agent, error) {
+	s.getCalls = append(s.getCalls, id)
+	a, ok := s.agents[id]
+	if !ok {
+		return Agent{}, ErrAgentNotFound
+	}
+	return a, nil
+}
+
+func (s *spyRepository) List(ctx context.Context) ([]Agent, error) {
+	out := make([]Agent, 0, len(s.agents))
+	for _, a := range s.agents {
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+func TestServiceGetByIDInvalidUUID(t *testing.T) {
+	spy := newSpyRepository()
+	svc := NewService(spy)
+
+	for _, id := range []string{"nope", "", "not-a-uuid", "12345", "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"} {
+		if _, err := svc.GetByID(context.Background(), id); !errors.Is(err, ErrAgentNotFound) {
+			t.Errorf("GetByID(%q) err = %v, want ErrAgentNotFound", id, err)
+		}
+	}
+	if len(spy.getCalls) != 0 {
+		t.Errorf("repository was consulted for invalid UUIDs: %v", spy.getCalls)
+	}
+}
+
+func TestServiceGetByIDValidUUIDReachesRepository(t *testing.T) {
+	spy := newSpyRepository()
+	svc := NewService(spy)
+
+	id := uuid.NewString()
+	if _, err := svc.GetByID(context.Background(), id); !errors.Is(err, ErrAgentNotFound) {
+		t.Fatalf("err = %v, want ErrAgentNotFound", err)
+	}
+	if len(spy.getCalls) != 1 || spy.getCalls[0] != id {
+		t.Errorf("repository GetByID calls = %v, want [%s]", spy.getCalls, id)
+	}
+}

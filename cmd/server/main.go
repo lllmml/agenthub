@@ -28,7 +28,7 @@ func run() error {
 	// storage, which would silently lose data on restart.
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
-		return errors.New("DATABASE_URL is required (e.g. postgres://agenthub:agenthub@localhost:5432/agenthub?sslmode=disable)")
+		return errors.New("DATABASE_URL is required (e.g. postgres://agenthub:<your-password>@localhost:5432/agenthub?sslmode=disable)")
 	}
 
 	// Stop on SIGINT (Ctrl+C) or SIGTERM.

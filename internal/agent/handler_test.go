@@ -207,3 +207,17 @@ func TestGetAgentNotFound(t *testing.T) {
 		t.Errorf("body = %s, want error code agent_not_found", rec.Body.String())
 	}
 }
+
+// TestGetAgentValidUUIDNotFound covers a well-formed but absent UUID:
+// it goes through the Repository, comes back as ErrAgentNotFound, and
+// maps to 404 with the same error code as a malformed ID.
+func TestGetAgentValidUUIDNotFound(t *testing.T) {
+	rec := doRequest(t, newTestHandler(), http.MethodGet, "/api/v1/agents/"+uuid.NewString(), nil)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"agent_not_found"`) {
+		t.Errorf("body = %s, want error code agent_not_found", rec.Body.String())
+	}
+}

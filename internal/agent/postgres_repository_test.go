@@ -3,7 +3,9 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,14 +39,54 @@ func newTestPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// testCtx returns a bounded context for test database setup and
+// cleanup, so network or destructive operations cannot hang the run.
+func testCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 10*time.Second)
+}
+
+// requireTestDatabaseName is the guard every destructive test
+// operation must pass: the database name must be non-empty and end in
+// "_test". It only inspects the name and never runs SQL, so callers
+// can abort before any DROP, TRUNCATE, or migration application.
+func requireTestDatabaseName(name string) error {
+	if name == "" {
+		return errors.New("refusing destructive test operations: database name is empty")
+	}
+	if !strings.HasSuffix(name, "_test") || name == "_test" {
+		return fmt.Errorf("refusing destructive test operations: database %q must end with %q and be a dedicated test database (e.g. agenthub_test)", name, "_test")
+	}
+	return nil
+}
+
+// ensureTestDatabase queries current_database() and requires the
+// connected database to be a dedicated test database. Call it before
+// any destructive SQL so a mistaken TEST_DATABASE_URL pointing at a
+// development or production database fails before touching data.
+func ensureTestDatabase(ctx context.Context, pool *pgxpool.Pool) error {
+	var name string
+	if err := pool.QueryRow(ctx, `SELECT current_database()`).Scan(&name); err != nil {
+		return fmt.Errorf("query current_database(): %w", err)
+	}
+	return requireTestDatabaseName(name)
+}
+
 // applySchema makes the test database match the versioned migration.
 // The SQL is read from the migration file so tests exercise exactly
-// what production applies. The drop happens only in the database
-// selected by TEST_DATABASE_URL and only when integration tests run.
+// what production applies. Destructive SQL runs only after the
+// connected database is verified to be a dedicated _test database.
 func applySchema(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 
-	ctx := context.Background()
+	ctx, cancel := testCtx()
+	defer cancel()
+
+	// Identity check before any DROP: a rejected database name aborts
+	// here and nothing below executes.
+	if err := ensureTestDatabase(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+
 	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS agents`); err != nil {
 		t.Fatalf("drop existing agents table: %v", err)
 	}
@@ -129,11 +171,13 @@ func TestPostgresRepositoryListDeterministicNewestFirst(t *testing.T) {
 		{tieID, base},
 	}
 	for _, row := range rows {
-		_, err := pool.Exec(context.Background(),
+		ctx, cancel := testCtx()
+		_, err := pool.Exec(ctx,
 			`INSERT INTO agents (id, name, description, created_at)
 			 VALUES ($1, $2, '', $3)`,
 			row.id, "agent", row.createdAt,
 		)
+		cancel()
 		if err != nil {
 			t.Fatalf("seed insert %s: %v", row.id, err)
 		}
@@ -176,7 +220,9 @@ func TestPostgresRepositoryRejectsBlankName(t *testing.T) {
 	pool := newTestPool(t)
 	applySchema(t, pool)
 
-	_, err := pool.Exec(context.Background(),
+	ctx, cancel := testCtx()
+	defer cancel()
+	_, err := pool.Exec(ctx,
 		`INSERT INTO agents (id, name, description) VALUES ($1, $2, $3)`,
 		uuid.NewString(), "   ", "",
 	)
@@ -198,5 +244,56 @@ func TestPostgresRepositoryCancellation(t *testing.T) {
 	}
 	if _, err := repo.GetByID(ctx, uuid.NewString()); !errors.Is(err, context.Canceled) {
 		t.Errorf("GetByID with cancelled context err = %v, want context.Canceled", err)
+	}
+}
+
+// TestRequireTestDatabaseName proves the guard accepts dedicated test
+// database names and rejects anything that could be a development or
+// production database.
+func TestRequireTestDatabaseName(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"agenthub_test", true},
+		{"ci_runner_test", true},
+		{"agenthub", false},
+		{"prod", false},
+		{"", false},
+		{"_test", false}, // the suffix alone is not a real database name
+	}
+	for _, tt := range tests {
+		err := requireTestDatabaseName(tt.name)
+		if tt.want && err != nil {
+			t.Errorf("requireTestDatabaseName(%q) = %v, want nil", tt.name, err)
+		}
+		if !tt.want && err == nil {
+			t.Errorf("requireTestDatabaseName(%q) = nil, want error", tt.name)
+		}
+	}
+}
+
+// TestRequireTestDatabaseNameBlocksDestructiveOps documents the guard
+// contract applySchema relies on: a rejected name never reaches the
+// destructive operation, which in applySchema is the DROP and the
+// migration application.
+func TestRequireTestDatabaseNameBlocksDestructiveOps(t *testing.T) {
+	// Mirrors applySchema: validate the name, then (and only then)
+	// perform destructive SQL.
+	run := func(name string) bool {
+		if err := requireTestDatabaseName(name); err != nil {
+			return false // destructive SQL must not run
+		}
+		return true // DROP/TRUNCATE/migration would run here
+	}
+
+	if run("agenthub") {
+		t.Error("destructive operation ran for a non-test database name")
+	}
+	if run("") {
+		t.Error("destructive operation ran for an empty database name")
+	}
+	if !run("agenthub_test") {
+		t.Error("destructive operation was blocked for a valid test database name")
 	}
 }
