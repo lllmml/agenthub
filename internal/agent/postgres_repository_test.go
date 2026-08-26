@@ -213,6 +213,29 @@ func TestPostgresRepositoryGetByIDNotFound(t *testing.T) {
 	}
 }
 
+// TestPostgresRepositoryListEmpty verifies an empty table produces a
+// non-nil, zero-length slice, so the HTTP layer can encode [] instead
+// of null.
+func TestPostgresRepositoryListEmpty(t *testing.T) {
+	pool := newTestPool(t)
+	applySchema(t, pool)
+	repo := NewPostgresRepository(pool)
+
+	ctx, cancel := testCtx()
+	defer cancel()
+
+	got, err := repo.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if got == nil {
+		t.Fatal("List returned nil, want non-nil empty slice")
+	}
+	if len(got) != 0 {
+		t.Fatalf("len(List) = %d, want 0", len(got))
+	}
+}
+
 // TestPostgresRepositoryRejectsBlankName bypasses the Service and hits
 // the database directly: the CHECK constraint is the last line of
 // defense behind Service-side validation.

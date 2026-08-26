@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -100,5 +101,32 @@ func TestServiceGetByIDValidUUIDReachesRepository(t *testing.T) {
 	}
 	if len(spy.getCalls) != 1 || spy.getCalls[0] != id {
 		t.Errorf("repository GetByID calls = %v, want [%s]", spy.getCalls, id)
+	}
+}
+
+// TestServiceGetByIDNormalizesAlternateUUIDForms verifies the Service
+// hands the canonical 36-character lowercase UUID to the repository
+// even when the request used a form uuid.Parse accepts but PostgreSQL
+// does not accept as a raw string (urn:uuid:, braced, hyphen-free).
+func TestServiceGetByIDNormalizesAlternateUUIDForms(t *testing.T) {
+	id := uuid.NewString()
+
+	forms := map[string]string{
+		"urn":        "urn:uuid:" + id,
+		"braced":     "{" + id + "}",
+		"no-hyphens": strings.ReplaceAll(id, "-", ""),
+	}
+	for name, form := range forms {
+		t.Run(name, func(t *testing.T) {
+			spy := newSpyRepository()
+			svc := NewService(spy)
+
+			if _, err := svc.GetByID(context.Background(), form); !errors.Is(err, ErrAgentNotFound) {
+				t.Fatalf("GetByID(%q) err = %v, want ErrAgentNotFound", form, err)
+			}
+			if len(spy.getCalls) != 1 || spy.getCalls[0] != id {
+				t.Errorf("repository GetByID calls = %v, want [%s]", spy.getCalls, id)
+			}
+		})
 	}
 }

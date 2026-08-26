@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -220,4 +222,103 @@ func TestGetAgentValidUUIDNotFound(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"code":"agent_not_found"`) {
 		t.Errorf("body = %s, want error code agent_not_found", rec.Body.String())
 	}
+}
+
+// TestGetAgentURNFormNormalized covers the urn:uuid: path form: the
+// Service parses it and queries the repository with the canonical
+// UUID, so the same agent is returned instead of a 500.
+func TestGetAgentURNFormNormalized(t *testing.T) {
+	h := newTestHandler()
+	createRec := doRequest(t, h, http.MethodPost, "/api/v1/agents", strings.NewReader(`{"name":"paper-assistant"}`))
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create: status = %d, want %d", createRec.Code, http.StatusCreated)
+	}
+	var created Agent
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("invalid create response: %v", err)
+	}
+
+	rec := doRequest(t, h, http.MethodGet, "/api/v1/agents/urn:uuid:"+created.ID, nil)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got Agent
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("invalid JSON response: %v", err)
+	}
+	if got != created {
+		t.Errorf("got %+v, want %+v", got, created)
+	}
+}
+
+// failingRepository simulates an unexpected storage failure: every
+// method returns an error containing sensitive internal text. It is a
+// hand-written fake, not a mock framework, and knows nothing about pgx.
+type failingRepository struct{}
+
+var _ Repository = (*failingRepository)(nil)
+
+func (failingRepository) Create(ctx context.Context, a Agent) (Agent, error) {
+	return Agent{}, errors.New("database password leaked here")
+}
+
+func (failingRepository) GetByID(ctx context.Context, id string) (Agent, error) {
+	return Agent{}, errors.New("database password leaked here")
+}
+
+func (failingRepository) List(ctx context.Context) ([]Agent, error) {
+	return nil, errors.New("database password leaked here")
+}
+
+func newFailingHandler() *Handler {
+	return NewHandler(NewService(failingRepository{}))
+}
+
+// assertSafeInternalError checks the generic, leak-free 500 contract:
+// status 500, JSON content type, error code internal_error, message
+// "internal server error", and none of the repository's internal text.
+func assertSafeInternalError(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	if strings.Contains(rec.Body.String(), "database password leaked here") {
+		t.Errorf("response leaks internal error text: %s", rec.Body.String())
+	}
+
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON error response: %v", err)
+	}
+	if body.Error.Code != "internal_error" {
+		t.Errorf("error code = %q, want %q", body.Error.Code, "internal_error")
+	}
+	if body.Error.Message != "internal server error" {
+		t.Errorf("error message = %q, want %q", body.Error.Message, "internal server error")
+	}
+}
+
+func TestCreateAgentRepositoryErrorMapsToSafe500(t *testing.T) {
+	rec := doRequest(t, newFailingHandler(), http.MethodPost, "/api/v1/agents", strings.NewReader(`{"name":"valid-name"}`))
+	assertSafeInternalError(t, rec)
+}
+
+func TestListAgentsRepositoryErrorMapsToSafe500(t *testing.T) {
+	rec := doRequest(t, newFailingHandler(), http.MethodGet, "/api/v1/agents", nil)
+	assertSafeInternalError(t, rec)
+}
+
+func TestGetAgentRepositoryErrorMapsToSafe500(t *testing.T) {
+	rec := doRequest(t, newFailingHandler(), http.MethodGet, "/api/v1/agents/"+uuid.NewString(), nil)
+	assertSafeInternalError(t, rec)
 }

@@ -34,15 +34,18 @@ func (s *Service) Create(ctx context.Context, in CreateAgentInput) (Agent, error
 	return s.repo.Create(ctx, a)
 }
 
-// GetByID returns one agent. IDs are UUIDs; anything else is not a
-// valid agent ID and maps to ErrAgentNotFound without consulting the
-// repository (PostgreSQL would reject the UUID cast with a driver
-// error the HTTP layer must not depend on).
+// GetByID returns one agent. The ID is parsed and normalized to the
+// canonical 36-character lowercase UUID form before it reaches the
+// repository: uuid.Parse accepts urn:uuid:..., {braced}, and
+// hyphen-free forms that PostgreSQL does not accept as raw strings, so
+// passing the original would surface a driver error. Malformed IDs map
+// to ErrAgentNotFound without consulting storage.
 func (s *Service) GetByID(ctx context.Context, id string) (Agent, error) {
-	if _, err := uuid.Parse(id); err != nil {
+	parsed, err := uuid.Parse(id)
+	if err != nil {
 		return Agent{}, ErrAgentNotFound
 	}
-	return s.repo.GetByID(ctx, id)
+	return s.repo.GetByID(ctx, parsed.String())
 }
 
 func (s *Service) List(ctx context.Context) ([]Agent, error) {
