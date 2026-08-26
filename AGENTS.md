@@ -1,22 +1,54 @@
 # AGENTS.md
 
-## Project: AgentHub
+## Project: AgentHub — Day 2
 
-AgentHub is a production-oriented AI backend project written in Go.
+AgentHub is a production-oriented AI backend project written in Go. Its long-term purpose is to demonstrate explainable, production-grade backend engineering for internship interviews and a resume.
 
-The long-term goal is to build a high-quality backend project that demonstrates real backend engineering skills and can be used as a strong internship/resume project.
+Day 1 is the working baseline:
 
-For **today**, keep the scope intentionally small:
+- standard-library `net/http` and modern `http.ServeMux` routes;
+- Handler → Service → Repository separation;
+- concurrency-safe `MemoryRepository`;
+- request-context propagation;
+- JSON responses and domain-to-HTTP error mapping;
+- graceful shutdown and tests.
 
-> Build the first HTTP API skeleton for AgentHub using Go's standard `net/http` package, with an in-memory Agent store.
+Day 2 changes one infrastructure boundary:
 
-Do **not** over-engineer the project or introduce infrastructure that is not needed yet.
+> Replace runtime in-memory persistence with PostgreSQL while preserving the HTTP contract and domain boundaries.
 
----
+Optimize for understanding the complete database request path, not feature count.
 
-## 1. Today's Goal
+## Day 2 outcome
 
-By the end of today's work, the project should provide a runnable Go HTTP server with these endpoints:
+By the end of Day 2, AgentHub must:
+
+- keep the existing endpoints and behaviors working;
+- persist Agents in PostgreSQL across process restarts;
+- use `github.com/jackc/pgx/v5` and `pgxpool`;
+- use explicit, parameterized SQL rather than an ORM;
+- manage schema with versioned up/down SQL migrations;
+- use UUID IDs that are safe across restarts and multiple instances;
+- propagate request contexts into database operations;
+- translate pgx errors into domain errors at the Repository boundary;
+- create one application-level connection pool and close it at shutdown;
+- include focused PostgreSQL integration tests;
+- document setup, migrations, running, testing, and persistence verification.
+
+Target path:
+
+```text
+Client → net/http → Handler → Service → Repository interface
+       → PostgresRepository → pgxpool.Pool → PostgreSQL
+```
+
+Handler and Service must not import or expose pgx types.
+
+## Preserve Day 1 behavior
+
+Do not rewrite working Day 1 code without a concrete reason.
+
+Keep:
 
 ```text
 GET  /health
@@ -25,863 +57,428 @@ POST /api/v1/agents
 GET  /api/v1/agents/{id}
 ```
 
-The server should:
+Preserve:
 
-- use Go's standard library where practical;
-- use `net/http`;
-- use Go's modern `http.ServeMux` route patterns;
-- return JSON responses;
-- parse JSON request bodies;
-- keep Agent data in memory;
-- have a basic Handler -> Service -> Repository separation;
-- include basic validation and error handling;
-- include tests for the main API behavior;
-- shut down gracefully.
+- JSON requests and responses;
+- malformed or trailing JSON returns `400 Bad Request`;
+- an empty or whitespace-only name returns `400 Bad Request`;
+- a missing Agent returns a JSON `404 Not Found`;
+- unexpected failures return a generic JSON `500` without internal details;
+- an empty list is `[]`, not `null`;
+- graceful shutdown;
+- Handler → Service → Repository dependency direction;
+- propagation of `r.Context()` through the entire request path.
 
-This is the first stage of the project. Optimize for clarity and learning, not feature count.
+Adding `created_at` to Agent responses is an intentional Day 2 contract change. Update affected tests and README examples coherently.
 
----
+## Scope restrictions
 
-## 2. Important Scope Restrictions
+Approved new dependencies are limited to the smallest practical set for:
 
-Do NOT add any of the following today unless explicitly requested:
+- PostgreSQL access with `github.com/jackc/pgx/v5`;
+- UUID generation with `github.com/google/uuid` or an equally small, justified package.
 
-- PostgreSQL
-- MySQL
-- Redis
-- RabbitMQ
-- Kafka
-- gRPC
-- Docker
-- Kubernetes
-- OpenTelemetry
-- Prometheus
-- Grafana
-- LangChain
-- vector databases
-- pgvector
-- microservices
-- authentication
-- JWT
-- ORM frameworks
-- Gin
-- Echo
-- Fiber
-- large third-party dependency stacks
+Do not add unless explicitly requested:
 
-Today's purpose is to understand and implement the HTTP request path clearly.
+- GORM, Ent, Bun, SQLBoiler, sqlc, or another ORM/code generator;
+- a migration framework when plain SQL files are sufficient;
+- Gin, Echo, Fiber, or another web framework;
+- Docker or Docker Compose;
+- Redis, RabbitMQ, Kafka, gRPC, auth, JWT, or microservices;
+- OpenTelemetry, Prometheus, Grafana, an LLM SDK, or a vector database;
+- dependency-injection/configuration frameworks;
+- a generic database layer for multiple database engines.
 
-Prefer the standard library.
+Do not create or alter tables from application startup code. Schema deployment and application startup are separate responsibilities.
 
----
+## Inspect before editing
 
-## 3. Expected Project Structure
+Before changes:
 
-Use this structure as the target:
+1. Read this file completely.
+2. Inspect the repository tree and `git status`.
+3. Read the Agent model, Repository, MemoryRepository, Service, Handler, tests, `main.go`, `go.mod`, and README.
+4. Run `go test ./...` once for a baseline.
+5. Identify the smallest coherent PostgreSQL change set.
+
+Adapt to the working code instead of assuming an earlier plan is exact. Preserve unrelated user changes.
+
+## Target structure
+
+Prefer the current domain-oriented layout:
 
 ```text
 agenthub/
-├── cmd/
-│   └── server/
-│       └── main.go
-│
+├── cmd/server/main.go
 ├── internal/
 │   ├── agent/
 │   │   ├── model.go
 │   │   ├── repository.go
 │   │   ├── memory_repository.go
+│   │   ├── postgres_repository.go
+│   │   ├── postgres_repository_test.go
 │   │   ├── service.go
-│   │   └── handler.go
-│   │
-│   └── httpx/
-│       └── response.go
-│
+│   │   ├── service_test.go
+│   │   ├── handler.go
+│   │   └── handler_test.go
+│   └── httpx/response.go
+├── migrations/
+│   ├── 000001_create_agents.up.sql
+│   └── 000001_create_agents.down.sql
 ├── go.mod
+├── go.sum
 ├── README.md
 └── AGENTS.md
 ```
 
-Minor deviations are acceptable if they improve clarity, but do not create unnecessary packages.
+Minor deviations are acceptable when they fit the current code. Keep persistence close to the `agent` domain. Do not create generic `database`, `db`, `common`, `base`, or `utils` packages for one small helper.
 
-Prefer grouping code by domain (`agent`) rather than creating many generic layers too early.
+## Domain model and IDs
 
----
-
-## 4. Domain Model
-
-Use an Agent model similar to:
+Extend the model:
 
 ```go
 type Agent struct {
-    ID          string `json:"id"`
-    Name        string `json:"name"`
-    Description string `json:"description"`
+    ID          string    `json:"id"`
+    Name        string    `json:"name"`
+    Description string    `json:"description"`
+    CreatedAt   time.Time `json:"created_at"`
 }
 ```
 
-For creating an agent, use a separate request type where appropriate:
+Keep `CreateAgentInput` separate. Rules:
 
-```go
-type CreateAgentInput struct {
-    Name        string `json:"name"`
-    Description string `json:"description"`
-}
+- generate a UUID in Service before calling Repository;
+- keep ID as a string in the domain and JSON API;
+- remove the process-local atomic counter;
+- trim and validate name in Service;
+- allow an empty description;
+- do not expose pgx types in domain structs.
+
+The Day 1 counter is unsafe after persistence: after restart it starts at zero while earlier IDs remain in PostgreSQL. It is also unsafe across multiple instances. Do not use `MAX(id)`, row counts, or a custom distributed ID generator.
+
+## Schema and migrations
+
+Create `migrations/000001_create_agents.up.sql` equivalent to:
+
+```sql
+CREATE TABLE agents (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT agents_name_not_blank CHECK (char_length(btrim(name)) > 0)
+);
 ```
 
-Rules:
+Create `migrations/000001_create_agents.down.sql` equivalent to:
 
-- `ID` is generated by the server.
-- `Name` is required.
-- `Name` should be trimmed before validation.
-- Empty names should return a client error.
-- Description may be empty.
-
-Avoid putting HTTP-specific logic into the domain model.
-
----
-
-## 5. Architecture
-
-Use a simple three-layer flow:
-
-```text
-HTTP Request
-    ↓
-Handler
-    ↓
-Service
-    ↓
-Repository
-    ↓
-In-memory storage
+```sql
+DROP TABLE agents;
 ```
 
-### Handler responsibilities
+Requirements:
 
-Handlers should:
+- use PostgreSQL `UUID` and `TIMESTAMPTZ`;
+- enforce a non-blank name in both Service and database;
+- rely on the primary-key index for ID lookups;
+- do not add speculative indexes;
+- keep migrations as versioned plain SQL and document `psql` usage;
+- mark the down migration as destructive;
+- do not use `CREATE TABLE IF NOT EXISTS` in application code;
+- never rewrite an already-applied migration for a later schema change; add the next version.
 
-- receive HTTP requests;
-- parse path parameters;
-- decode JSON;
-- validate transport-level input;
-- call the service;
-- map service errors to HTTP status codes;
-- encode JSON responses.
+Service validation gives friendly errors. The database constraint is the last data-integrity defense. Both are intentional.
 
-Handlers should NOT:
+## Repository contract
 
-- contain storage logic;
-- directly manipulate the repository map;
-- contain large amounts of business logic.
-
-### Service responsibilities
-
-The service should:
-
-- implement application/business logic;
-- validate domain-level rules;
-- generate IDs when creating Agents;
-- call the repository;
-- return meaningful errors.
-
-The service should not know about:
-
-- `http.ResponseWriter`;
-- HTTP status codes;
-- JSON encoding.
-
-### Repository responsibilities
-
-The repository should define the persistence abstraction.
-
-Example shape:
+Keep the interface independent of PostgreSQL. Change create coherently to return the persisted row:
 
 ```go
 type Repository interface {
-    Create(ctx context.Context, agent Agent) error
+    Create(ctx context.Context, agent Agent) (Agent, error)
     GetByID(ctx context.Context, id string) (Agent, error)
     List(ctx context.Context) ([]Agent, error)
 }
 ```
 
-The in-memory implementation should be concurrency-safe.
+Returning the row lets PostgreSQL remain the source of the `created_at` default. Update MemoryRepository, Service, and tests consistently. MemoryRepository may set `CreatedAt` when it receives a zero value so fast tests remain meaningful.
 
-Use:
+The interface must not mention `pgxpool.Pool`, `pgx.Row`, SQL strings, or PostgreSQL error codes.
+
+## PostgresRepository and SQL
+
+Add:
 
 ```go
-sync.RWMutex
+type PostgresRepository struct {
+    pool *pgxpool.Pool
+}
+
+func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository
 ```
 
-or another simple standard-library mechanism.
+Requirements:
 
-Do not introduce a database abstraction framework.
+- inject the pool; never create one per request or method;
+- pass the received context to every pgx call;
+- use `$1`, `$2`, etc. for user-controlled values;
+- never concatenate user input into SQL;
+- explicitly list columns and scan into the domain model;
+- wrap unexpected errors with operation context and `%w`;
+- translate known infrastructure errors at this boundary;
+- close query rows and check `rows.Err()`;
+- do not use global database variables.
 
----
+Required SQL should be equivalent to:
 
-## 6. HTTP API Contract
-
-### GET /health
-
-Response:
-
-```http
-200 OK
-Content-Type: application/json
+```sql
+INSERT INTO agents (id, name, description)
+VALUES ($1, $2, $3)
+RETURNING id, name, description, created_at;
 ```
 
-```json
-{
-  "status": "ok"
+```sql
+SELECT id, name, description, created_at
+FROM agents
+WHERE id = $1;
+```
+
+```sql
+SELECT id, name, description, created_at
+FROM agents
+ORDER BY created_at DESC, id DESC;
+```
+
+The ID tie-breaker makes ordering deterministic when timestamps match. Do not use `SELECT *`.
+
+## Error translation
+
+The rest of the application must not depend on pgx errors.
+
+```go
+if errors.Is(err, pgx.ErrNoRows) {
+    return Agent{}, ErrAgentNotFound
 }
 ```
 
----
-
-### POST /api/v1/agents
-
-Request:
-
-```json
-{
-  "name": "paper-assistant",
-  "description": "Help users read papers"
-}
-```
-
-Successful response:
-
-```http
-201 Created
-Content-Type: application/json
-```
-
-Example body:
-
-```json
-{
-  "id": "generated-id",
-  "name": "paper-assistant",
-  "description": "Help users read papers"
-}
-```
-
-Invalid JSON:
-
-```http
-400 Bad Request
-```
-
-Missing or empty name:
-
-```http
-400 Bad Request
-```
-
-Do not silently accept malformed JSON.
-
-Prefer rejecting unexpected trailing JSON content.
-
----
-
-### GET /api/v1/agents
-
-Response:
-
-```http
-200 OK
-Content-Type: application/json
-```
-
-Example:
-
-```json
-[
-  {
-    "id": "generated-id",
-    "name": "paper-assistant",
-    "description": "Help users read papers"
-  }
-]
-```
-
-If there are no agents, return:
-
-```json
-[]
-```
-
-Prefer an empty JSON array over `null`.
-
----
-
-### GET /api/v1/agents/{id}
-
-If found:
-
-```http
-200 OK
-```
-
-If not found:
-
-```http
-404 Not Found
-```
-
-Return a JSON error response rather than plain text.
-
----
-
-## 7. JSON Response Format
-
-Use consistent JSON responses.
-
-For errors, prefer something simple such as:
-
-```json
-{
-  "error": {
-    "code": "agent_not_found",
-    "message": "agent not found"
-  }
-}
-```
-
-Do not create a complicated error framework today.
-
-A small helper package such as `internal/httpx` is acceptable for:
-
-- writing JSON;
-- writing JSON errors.
-
-Always set:
-
-```http
-Content-Type: application/json
-```
-
-before writing JSON.
-
----
-
-## 8. Error Design
-
-Define sentinel/domain errors where useful.
-
-For example:
-
-```go
-var ErrAgentNotFound = errors.New("agent not found")
-var ErrInvalidAgentName = errors.New("agent name is required")
-```
-
-Handlers may use:
-
-```go
-errors.Is(...)
-```
-
-to map errors to HTTP responses.
-
-Do not compare error strings.
-
-Do not expose internal implementation details in API responses.
-
----
-
-## 9. Context Usage
-
-Pass `r.Context()` from the handler into the service/repository path.
-
-Example:
-
-```go
-agent, err := service.GetByID(r.Context(), id)
-```
-
-Even though the in-memory repository does not currently need cancellation, keep context propagation correct because later this path will include:
-
-- database calls;
-- Redis;
-- LLM requests;
-- RAG retrieval;
-- remote services.
-
-Do not replace request context with `context.Background()` inside the request path.
-
----
-
-## 10. Routing
-
-Use Go's standard `http.ServeMux`.
-
-Prefer route patterns such as:
-
-```go
-mux.HandleFunc("GET /health", ...)
-mux.HandleFunc("GET /api/v1/agents", ...)
-mux.HandleFunc("POST /api/v1/agents", ...)
-mux.HandleFunc("GET /api/v1/agents/{id}", ...)
-```
-
-For path parameters, use:
-
-```go
-id := r.PathValue("id")
-```
-
-Do not introduce a third-party router today.
-
----
-
-## 11. Server Construction
-
-Do not rely on a bare production-style:
-
-```go
-http.ListenAndServe(":8080", mux)
-```
-
-Instead, construct an `http.Server` explicitly.
-
-Example direction:
-
-```go
-server := &http.Server{
-    Addr:              ":8080",
-    Handler:           mux,
-    ReadHeaderTimeout: 5 * time.Second,
-}
-```
-
-Reasonable timeout values are welcome, but do not spend excessive time tuning them today.
-
----
-
-## 12. Graceful Shutdown
-
-Implement basic graceful shutdown.
-
-The server should:
-
-1. start serving;
-2. listen for process termination signals;
-3. create a shutdown context with a timeout;
-4. call `server.Shutdown(ctx)`;
-5. exit cleanly.
-
-Use standard library packages such as:
-
-```go
-os/signal
-syscall
-context
-time
-```
-
-Keep the implementation understandable.
-
----
-
-## 13. Logging
-
-Use standard library logging for now.
-
-Acceptable options:
-
-```go
-log
-```
-
-or:
-
-```go
-log/slog
-```
-
-Prefer `log/slog` if the code remains simple.
-
-Log at minimum:
-
-- server startup;
-- server shutdown;
-- fatal server errors.
-
-Do not introduce Zap, Logrus, or another logging dependency today.
-
----
-
-## 14. ID Generation
-
-Avoid adding a dependency only for UUID generation unless there is a clear reason.
-
-For today's exercise, use a simple unique ID strategy with the standard library.
-
-Possible approaches:
-
-- a monotonically increasing numeric ID converted to string;
-- an atomic counter;
-- another simple collision-free in-process strategy.
-
-The exact ID format is not important today.
-
-Do not build a distributed ID generator.
-
----
-
-## 15. Concurrency Safety
-
-Remember that Go's HTTP server may handle multiple requests concurrently.
-
-The in-memory repository must therefore be safe for concurrent access.
-
-Incorrect:
-
-```go
-map[string]Agent
-```
-
-with unsynchronized reads/writes.
-
-Correct direction:
-
-```go
-type MemoryRepository struct {
-    mu     sync.RWMutex
-    agents map[string]Agent
-}
-```
-
-Use:
-
-```go
-RLock / RUnlock
-```
-
-for reads and:
-
-```go
-Lock / Unlock
-```
-
-for writes.
-
-Keep lock scope small.
-
----
-
-## 16. Dependency Wiring
-
-Create dependencies in `cmd/server/main.go`.
-
-Conceptually:
+Preserve this boundary:
 
 ```text
-MemoryRepository
-      ↓
-AgentService
-      ↓
-AgentHandler
-      ↓
-ServeMux
-      ↓
-http.Server
+pgx error → PostgresRepository translation → domain error
+          → Service → Handler → safe HTTP response
 ```
 
-Avoid global mutable state.
+- map `pgx.ErrNoRows` to existing `ErrAgentNotFound`;
+- preserve `errors.Is` when wrapping;
+- never compare error strings;
+- never expose SQL, connection strings, PostgreSQL messages, or driver details;
+- unexpected failures become the existing generic `500` response;
+- do not build elaborate conflict handling for extremely unlikely UUID collisions.
 
-Prefer constructor functions such as:
+## Pool lifecycle and wiring
 
-```go
-NewMemoryRepository()
-NewService(repo)
-NewHandler(service)
+`cmd/server/main.go` remains the composition root.
+
+Startup:
+
+1. read `DATABASE_URL`;
+2. fail clearly if missing;
+3. parse the pgxpool configuration;
+4. create one application-level pool;
+5. ping PostgreSQL using a bounded startup context;
+6. construct `PostgresRepository`;
+7. inject Repository → Service → Handler;
+8. start the existing HTTP server.
+
+Shutdown:
+
+1. stop accepting requests;
+2. drain in-flight requests within the existing timeout;
+3. close the pool;
+4. exit cleanly.
+
+Do not silently fall back to MemoryRepository when configuration or PostgreSQL is unavailable. Keep MemoryRepository for fast tests, but runtime must use PostgresRepository. Do not log `DATABASE_URL`.
+
+Use pgxpool defaults unless a small setting has a clear reason. If configuring `MaxConns`, document that total possible connections are approximately `service instances × MaxConns`. A pool provides reuse and bounds database concurrency; larger is not automatically better.
+
+## Context rules
+
+Preserve:
+
+```text
+r.Context() → Handler → Service → PostgresRepository
+            → pool.QueryRow / pool.Query
 ```
 
-This will make future testing and infrastructure replacement easier.
+- do not replace request context with `context.Background()`;
+- do not create unrelated contexts inside Repository methods;
+- return cancellation/deadline errors promptly;
+- use a separate bounded context only for startup operations.
 
----
+## Health endpoint
 
-## 17. Tests Required Today
+Keep `GET /health` as simple process liveness:
 
-Add tests using Go's standard `testing` and `net/http/httptest`.
+```json
+{"status":"ok"}
+```
 
-At minimum test:
+Check database availability during startup. Do not add a full liveness/readiness subsystem in Day 2.
 
-### Health endpoint
+## Fast tests
 
-- returns `200`;
-- returns JSON;
-- contains `"status":"ok"`.
+Keep unit and HTTP tests independent of PostgreSQL. Use MemoryRepository or a small domain fake to test:
 
-### Create agent
+- blank-name validation;
+- generated IDs are parseable UUIDs;
+- create/list/get behavior;
+- Handler status codes and JSON;
+- missing Agent maps to `404`;
+- unexpected Repository errors map to `500` without leaks;
+- `created_at` is meaningful without exact-time assertions.
 
-- valid request returns `201`;
-- response contains generated ID;
-- name and description are preserved;
-- empty name returns `400`;
-- malformed JSON returns `400`.
+Do not mock pgx internals for Service or Handler tests.
 
-### List agents
+## PostgreSQL integration tests
 
-- initially returns `[]`;
-- returns previously created agents.
+Test PostgresRepository against a real, dedicated test database selected only by:
 
-### Get agent
+```text
+TEST_DATABASE_URL
+```
 
-- existing ID returns `200`;
-- missing ID returns `404`.
+Rules:
 
-### Repository
+- when absent, skip only integration tests with a clear message;
+- ordinary tests must still run;
+- never use `DATABASE_URL` for destructive test cleanup;
+- require/apply the Day 2 schema before tests;
+- clean only data in the dedicated test database;
+- keep isolation explicit and avoid timing-based sleeps;
+- report whether these tests ran or were skipped.
 
-Test basic create/get/list behavior.
+At minimum, test:
 
-Concurrency test is optional, but the code should pass:
+- create returns the row with non-zero `created_at`;
+- get returns the correct Agent;
+- list has deterministic newest-first order;
+- missing UUID becomes `ErrAgentNotFound` through `errors.Is`;
+- the database rejects a blank name when Service is bypassed;
+- cancellation reaches a database call where reliably testable.
+
+## README requirements
+
+Document:
+
+- the PostgreSQL milestone and prerequisites: Go, PostgreSQL, `psql`;
+- creating/selecting a local database;
+- placeholder `DATABASE_URL` configuration;
+- applying the up migration and destructive down migration;
+- running the server and ordinary tests;
+- integration tests with `TEST_DATABASE_URL`;
+- why runtime uses PostgresRepository while fast tests use MemoryRepository;
+- manual persistence proof: create an Agent, restart the process against the same database, then fetch it.
+
+Local-only example:
 
 ```bash
-go test -race ./...
+export DATABASE_URL='postgres://agenthub:agenthub@localhost:5432/agenthub?sslmode=disable'
 ```
 
----
+Never commit credentials or secret `.env` files. Do not use `sslmode=disable` outside clearly local examples.
 
-## 18. Quality Gates
+## Implementation order
 
-Before considering today's work complete, run:
+1. Inspect code and establish a test baseline.
+2. Add `CreatedAt` and update the Repository create contract.
+3. Replace the atomic counter with UUIDs.
+4. Update MemoryRepository and fast tests.
+5. Add up/down migrations.
+6. Add PostgresRepository and explicit SQL.
+7. Add error translation.
+8. Add integration tests.
+9. Wire `DATABASE_URL`, startup ping, pool, and repository in `main.go`.
+10. Preserve graceful shutdown and close the pool.
+11. Update HTTP tests and README.
+12. Run quality gates and review the diff.
+
+Do not begin by rewriting handlers or adding unrelated infrastructure.
+
+## Quality gates
+
+Before declaring completion, run:
 
 ```bash
+go mod tidy
 go fmt ./...
 go vet ./...
 go test ./...
 go test -race ./...
 ```
 
-All should pass.
+Also run integration tests with `TEST_DATABASE_URL` when available. Report exact commands and outcomes; never claim skipped tests passed.
 
-If a linter is not already installed, do not spend time installing a large lint stack today.
+## Coding and safety rules
 
----
+Prefer idiomatic Go, small functions, explicit constructors, direct SQL near Repository methods, early returns, `%w`, `errors.Is`, table-driven tests where useful, `t.Cleanup`, deterministic data, and comments that explain why.
 
-## 19. README Requirements
+Avoid global pools, generic base repositories, a query builder for three statements, interfaces wrapping every pgx type, `SELECT *`, SQL concatenation, swallowed `rows.Err()`, duplicate logging at every layer, panics for expected startup errors, sleeps in tests, and transaction abstractions for single-statement operations.
 
-Update `README.md` with a concise section containing:
+Never expose/log credentials or database internals. Never run a down migration or destructive cleanup against an unidentified database. Preserve unrelated user changes.
 
-### Project description
+## Definition of done
 
-Explain that AgentHub is a production-oriented AI backend project written in Go.
+- [ ] Existing endpoints and error contracts still work.
+- [ ] Runtime persistence uses PostgreSQL; fast tests may retain MemoryRepository.
+- [ ] IDs are UUIDs and JSON contains `created_at`.
+- [ ] Versioned up/down migrations exist.
+- [ ] Schema uses UUID primary key, `TIMESTAMPTZ`, and constraints.
+- [ ] PostgresRepository implements the domain interface.
+- [ ] SQL is explicit, parameterized, and lists columns.
+- [ ] List ordering is deterministic.
+- [ ] `pgx.ErrNoRows` becomes `ErrAgentNotFound`.
+- [ ] Unexpected database errors never leak to clients.
+- [ ] Request context reaches every database operation.
+- [ ] One pool is created, pinged with a timeout, and closed at shutdown.
+- [ ] Missing/invalid database configuration fails clearly with no memory fallback.
+- [ ] Fast tests remain database-independent.
+- [ ] PostgreSQL integration tests exist and skips are reported honestly.
+- [ ] README covers setup, migrations, tests, and restart persistence.
+- [ ] tidy, format, vet, tests, and race tests pass.
+- [ ] No ORM, Docker, cache, queue, auth, observability stack, or unrelated framework was added.
 
-### Current milestone
+## Learning checkpoint
 
-State that the current version implements the initial HTTP API using in-memory storage.
+Keep the result simple enough to explain:
 
-### How to run
+- why PostgreSQL data survives process restart;
+- PostgreSQL Server vs TCP connection vs `pgx.Conn` vs `pgxpool.Pool`;
+- pool reuse and concurrency limits;
+- why the Day 1 atomic ID fails after persistence and why UUID fixes it;
+- table, row, column, primary key, constraint, index, and migration;
+- why migrations version schema changes;
+- why Handler and Service do not import pgx;
+- why `pgx.ErrNoRows` becomes a domain error;
+- why request context reaches pgx;
+- why list SQL needs `ORDER BY`;
+- why MemoryRepository remains useful in tests;
+- when a multi-statement workflow requires a transaction;
+- what GORM automates and why Day 2 intentionally uses direct SQL.
 
-```bash
-go run ./cmd/server
-```
+## Required final report
 
-### How to test
+The coding agent must summarize:
 
-```bash
-go test ./...
-```
+- files changed and behavior implemented;
+- Repository, schema, SQL, and error-mapping decisions;
+- exact validation commands and results;
+- whether integration tests actually ran or were skipped;
+- remaining setup or blockers;
+- any deliberate deviation and its reason.
 
-### Example requests
+If PostgreSQL or `TEST_DATABASE_URL` is unavailable, complete database-independent work, leave integration tests runnable, and report the limitation precisely. Never fabricate results.
 
-Include examples such as:
+Day 2 milestone:
 
-```bash
-curl http://localhost:8080/health
-```
-
-and:
-
-```bash
-curl -X POST http://localhost:8080/api/v1/agents \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "paper-assistant",
-    "description": "Help users read papers"
-  }'
-```
-
-Do not write a giant README today.
-
----
-
-## 20. Implementation Order
-
-Follow this order unless there is a strong reason not to:
-
-1. Inspect the existing repository.
-2. Initialize/fix `go.mod` if necessary.
-3. Create the Agent model.
-4. Define repository interface.
-5. Implement concurrency-safe in-memory repository.
-6. Implement service.
-7. Implement JSON response helpers.
-8. Implement handlers.
-9. Wire routes and dependencies.
-10. Build explicit `http.Server`.
-11. Add graceful shutdown.
-12. Add tests.
-13. Run formatting/vet/tests/race detector.
-14. Update README.
-15. Review the diff for unnecessary complexity.
-
-Do not skip directly to infrastructure.
-
----
-
-## 21. Coding Style
-
-Follow idiomatic Go.
-
-Prefer:
-
-- small functions;
-- explicit dependencies;
-- clear naming;
-- standard library;
-- early returns;
-- `errors.Is` for known errors;
-- interfaces defined near the consumer when appropriate;
-- minimal exported API;
-- context propagation;
-- table-driven tests where useful.
-
-Avoid:
-
-- deep inheritance-style abstractions;
-- generic "utils" dumping grounds;
-- unnecessary interfaces;
-- package names like `common`, `base`, or `manager` without a precise meaning;
-- premature generics;
-- global service locators;
-- magic behavior;
-- reflection-heavy frameworks.
-
-Comments should explain **why**, not restate obvious code.
-
----
-
-## 22. Learning-Oriented Requirement
-
-This project is not just about generating code.
-
-When making an important implementation choice, leave the code in a state where the following concepts are easy to explain:
-
-```text
-Client
-  ↓
-TCP connection
-  ↓
-Go net/http server
-  ↓
-ServeMux
-  ↓
-Handler
-  ↓
-Service
-  ↓
-Repository
-  ↓
-In-memory state
-  ↓
-JSON response
-```
-
-The implementation should make it possible to clearly answer:
-
-- What does `http.Server` do?
-- What is `http.Handler`?
-- What is `ServeHTTP`?
-- What does `ServeMux` do?
-- Why is `r.Context()` passed downward?
-- Why must the in-memory repository use a mutex?
-- Why separate Handler, Service, and Repository?
-- Why are we not using microservices yet?
-- Why are we not using Gin yet?
-- What changes later when the repository becomes PostgreSQL?
-
-Do not hide these concepts behind frameworks.
-
----
-
-## 23. Definition of Done
-
-Today's milestone is complete only when all of the following are true:
-
-- [ ] `go run ./cmd/server` starts the server successfully.
-- [ ] `GET /health` returns `200` JSON.
-- [ ] `POST /api/v1/agents` creates an Agent.
-- [ ] Created Agents receive server-generated IDs.
-- [ ] Invalid Agent input returns a JSON `400` response.
-- [ ] `GET /api/v1/agents` lists Agents.
-- [ ] Empty Agent list is encoded as `[]`.
-- [ ] `GET /api/v1/agents/{id}` returns an Agent.
-- [ ] Missing Agent returns a JSON `404` response.
-- [ ] Handler, Service, and Repository responsibilities are separated.
-- [ ] The repository is concurrency-safe.
-- [ ] Request context is propagated.
-- [ ] The app uses an explicit `http.Server`.
-- [ ] Graceful shutdown is implemented.
-- [ ] Core HTTP behavior has tests.
-- [ ] `go fmt ./...` passes.
-- [ ] `go vet ./...` passes.
-- [ ] `go test ./...` passes.
-- [ ] `go test -race ./...` passes.
-- [ ] README contains run/test/example instructions.
-- [ ] No unnecessary database/cache/MQ/framework dependencies were introduced.
-
----
-
-## 24. Instructions for Coding Agents
-
-When acting as a coding agent in this repository:
-
-1. Read this file before making changes.
-2. Inspect existing code before creating new files.
-3. Preserve working code unless a change is necessary.
-4. Make incremental, reviewable changes.
-5. Do not silently expand the scope.
-6. Prefer standard-library solutions today.
-7. Explain any meaningful architectural deviation.
-8. Run tests after implementation.
-9. Fix failures before declaring completion.
-10. Summarize:
-   - files changed;
-   - behavior implemented;
-   - tests run;
-   - any remaining issues.
-
-If uncertain between a simple solution and a more "enterprise" solution, choose the simpler solution that satisfies today's requirements.
-
----
-
-## 25. Explicit Non-Goals for Today
-
-These are intentionally deferred to future milestones:
-
-```text
-PostgreSQL
-    ↓
-Redis
-    ↓
-LLM Gateway + streaming
-    ↓
-RAG / pgvector
-    ↓
-Async workers / MQ
-    ↓
-OpenTelemetry
-    ↓
-Prometheus / Grafana
-    ↓
-Docker / CI/CD / deployment
-```
-
-Do not implement future milestones prematurely.
-
-Today's milestone is:
-
-> A clean, testable, concurrency-safe Go HTTP API foundation that we fully understand.
+> A clean PostgreSQL persistence layer that proves the Repository boundary, survives process restarts, propagates cancellation, preserves the HTTP contract, and remains small enough to explain line by line.
