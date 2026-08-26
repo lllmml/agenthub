@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // MemoryRepository stores agents in memory. The HTTP server handles
@@ -16,12 +17,17 @@ func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{agents: make(map[string]Agent)}
 }
 
-func (r *MemoryRepository) Create(ctx context.Context, a Agent) error {
+func (r *MemoryRepository) Create(ctx context.Context, a Agent) (Agent, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// PostgreSQL supplies created_at via its DEFAULT; stamp zero values
+	// here so fast tests see the same contract without a database.
+	if a.CreatedAt.IsZero() {
+		a.CreatedAt = time.Now()
+	}
 	r.agents[a.ID] = a
-	return nil
+	return a, nil
 }
 
 func (r *MemoryRepository) GetByID(ctx context.Context, id string) (Agent, error) {

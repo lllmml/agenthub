@@ -1,12 +1,18 @@
 package agent
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // Agent is the domain model for an AI agent.
 type Agent struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	// CreatedAt is supplied by the storage layer (TIMESTAMPTZ in
+	// PostgreSQL, time.Now in MemoryRepository) rather than by callers.
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // CreateAgentInput is the payload for creating an agent.
