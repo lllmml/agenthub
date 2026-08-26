@@ -1,20 +1,73 @@
 # AgentHub
 
-AgentHub is a production-oriented AI backend project written in Go.
+AgentHub is a production-oriented AI backend project written in Go. Its
+long-term purpose is to demonstrate explainable, production-grade backend
+engineering.
 
 ## Current Milestone
 
-Initial HTTP API with in-memory storage, built on the Go standard library
-(`net/http`, `http.ServeMux`, `log/slog`):
+Day 2: a PostgreSQL persistence layer behind the existing HTTP API. The
+Handler -> Service -> Repository separation is preserved; only the
+Repository implementation changed from in-memory to PostgreSQL, so agents
+survive process restarts.
+
+Request path:
+
+```text
+Client -> net/http -> Handler -> Service -> Repository interface
+       -> PostgresRepository -> pgxpool.Pool -> PostgreSQL
+```
+
+Endpoints (HTTP contract unchanged from Day 1):
 
 - `GET /health`
 - `GET /api/v1/agents`
 - `POST /api/v1/agents`
 - `GET /api/v1/agents/{id}`
 
-The code follows a Handler -> Service -> Repository separation, uses a
-concurrency-safe in-memory store, propagates request contexts, and shuts
-down gracefully on `SIGINT`/`SIGTERM`.
+Agents now carry a server-supplied `created_at` and a UUID `id`, both
+produced by PostgreSQL/Service instead of a process-local counter.
+
+## Prerequisites
+
+- Go 1.26+
+- PostgreSQL (server) and `psql` (client)
+
+## Setup
+
+Create a local database and user (one time):
+
+```bash
+createuser --createdb agenthub
+createdb --owner=agenthub agenthub
+```
+
+Configure the connection string. Local-only example:
+
+```bash
+export DATABASE_URL='postgres://agenthub:agenthub@localhost:5432/agenthub?sslmode=disable'
+```
+
+Do not use `sslmode=disable` outside clearly local setups, and never
+commit credentials.
+
+### Migrations
+
+Schema is managed as versioned plain SQL in `migrations/`. Apply the up
+migration with `psql` (schema deployment is a separate step from
+application startup; the server never creates tables):
+
+```bash
+psql "$DATABASE_URL" -f migrations/000001_create_agents.up.sql
+```
+
+The down migration is destructive (drops the table and all its data):
+
+```bash
+psql "$DATABASE_URL" -f migrations/000001_create_agents.down.sql
+```
+
+Never edit an applied migration; add the next versioned file instead.
 
 ## How to Run
 
@@ -22,18 +75,38 @@ down gracefully on `SIGINT`/`SIGTERM`.
 go run ./cmd/server
 ```
 
-The server listens on `:8080`. If that port is unavailable, override it
-with the `PORT` environment variable:
+The server fails fast with a clear error if `DATABASE_URL` is missing or
+PostgreSQL is unreachable — it never falls back to in-memory storage.
+The server listens on `:8080`; override with `PORT` if needed:
 
 ```bash
 PORT=8083 go run ./cmd/server
 ```
 
+On `SIGINT`/`SIGTERM` the server stops accepting requests, drains
+in-flight requests, then closes the connection pool.
+
 ## How to Test
+
+Ordinary tests are database-independent (they use MemoryRepository):
 
 ```bash
 go test ./...
 ```
+
+Integration tests exercise PostgresRepository against a real database
+selected only by `TEST_DATABASE_URL`; they skip with a clear message
+when it is unset:
+
+```bash
+export TEST_DATABASE_URL='postgres://agenthub:agenthub@localhost:5432/agenthub_test?sslmode=disable'
+go test -v ./internal/agent/ -run TestPostgresRepository
+```
+
+Why two repositories? Runtime uses PostgresRepository because agents
+must survive restarts and be shared across instances. Fast tests use
+MemoryRepository so unit/HTTP tests run instantly with no database and
+no pgx mocking. The Repository interface keeps both interchangeable.
 
 ## Example Requests
 
@@ -55,5 +128,23 @@ curl http://localhost:8080/api/v1/agents
 ```
 
 ```bash
-curl http://localhost:8080/api/v1/agents/agent-1
+curl http://localhost:8080/api/v1/agents/<id-from-create-response>
+```
+
+## Persistence Proof
+
+Create an agent, then restart the process against the same database and
+fetch it again:
+
+```bash
+# terminal 1
+go run ./cmd/server
+curl -X POST http://localhost:8080/api/v1/agents \
+  -H "Content-Type: application/json" -d '{"name":"durable"}'
+# note the returned id
+
+# Ctrl+C, then start the server again (same DATABASE_URL)
+go run ./cmd/server
+curl http://localhost:8080/api/v1/agents/<that-id>
+# the agent is still there: data survived the process restart
 ```

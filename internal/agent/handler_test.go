@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func newTestHandler() *Handler {
@@ -61,6 +63,12 @@ func TestCreateAgent(t *testing.T) {
 	if got.ID == "" {
 		t.Error("response ID is empty, want server-generated ID")
 	}
+	if _, err := uuid.Parse(got.ID); err != nil {
+		t.Errorf("ID %q is not a parseable UUID: %v", got.ID, err)
+	}
+	if got.CreatedAt.IsZero() {
+		t.Error("response CreatedAt is zero, want server-supplied timestamp")
+	}
 	if got.Name != "paper-assistant" {
 		t.Errorf("name = %q, want %q", got.Name, "paper-assistant")
 	}
@@ -81,6 +89,9 @@ func TestCreateAgentTrimsName(t *testing.T) {
 	}
 	if got.Name != "paper-assistant" {
 		t.Errorf("name = %q, want trimmed %q", got.Name, "paper-assistant")
+	}
+	if got.CreatedAt.IsZero() {
+		t.Error("response CreatedAt is zero, want server-supplied timestamp")
 	}
 }
 
@@ -150,6 +161,9 @@ func TestListAgents(t *testing.T) {
 	for _, a := range got {
 		if a.ID == "" {
 			t.Error("agent in list has empty ID")
+		}
+		if a.CreatedAt.IsZero() {
+			t.Error("agent in list has zero CreatedAt")
 		}
 		names[a.Name] = true
 	}
