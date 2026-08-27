@@ -48,6 +48,10 @@ func NewRedisClientOptions(rawURL string) (*redis.Options, error) {
 	// -1 is the documented value that disables retries (0 means default 3).
 	opts.MaxRetries = -1
 
+	// One TCP dial attempt for cache operations.
+	// Redis is optional, so repeated dial retries only delay DB fallback.
+	opts.DialerRetries = 1
+
 	// Honor the caller-derived context deadline for dials and socket
 	// I/O instead of replacing the context with context.Background().
 	opts.ContextTimeoutEnabled = true
