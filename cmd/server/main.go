@@ -58,16 +58,10 @@ func run() error {
 	// to a no-op and PostgreSQL keeps serving every request.
 	var cache agent.AgentCache = agent.NewNoopAgentCache()
 	if url := os.Getenv("REDIS_URL"); url != "" {
-		opts, err := redis.ParseURL(url)
+		opts, err := agent.NewRedisClientOptions(url)
 		if err != nil {
 			slog.Warn("invalid REDIS_URL; Redis caching disabled", "error", err)
 		} else {
-			// Bound Redis operations so a slow or broken cache fails
-			// fast enough for the Service to fall back to PostgreSQL.
-			opts.DialTimeout = 1 * time.Second
-			opts.ReadTimeout = 1 * time.Second
-			opts.WriteTimeout = 1 * time.Second
-
 			client := redis.NewClient(opts)
 
 			// Bounded startup connectivity check: unlike PostgreSQL,

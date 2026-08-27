@@ -22,7 +22,7 @@ func newTestRedisClient(t *testing.T) *redis.Client {
 		t.Skip("TEST_REDIS_URL not set; skipping Redis integration tests")
 	}
 
-	opts, err := redis.ParseURL(url)
+	opts, err := NewRedisClientOptions(url)
 	if err != nil {
 		t.Fatalf("parse TEST_REDIS_URL: %v", err)
 	}
@@ -44,6 +44,30 @@ func cleanupKey(t *testing.T, client *redis.Client, key string) {
 	defer cancel()
 	if err := client.Del(ctx, key).Err(); err != nil {
 		t.Errorf("cleanup key %q: %v", key, err)
+	}
+}
+
+// TestNewRedisClientOptions pins the fast-failure client configuration.
+// Without it, go-redis defaults (3 retries with backoff, 5s timeouts,
+// context replaced by context.Background()) let a dead Redis block the
+// PostgreSQL fallback for seconds. This test runs without a server.
+func TestNewRedisClientOptions(t *testing.T) {
+	opts, err := NewRedisClientOptions("redis://localhost:6379/0")
+	if err != nil {
+		t.Fatalf("NewRedisClientOptions: %v", err)
+	}
+	if opts.MaxRetries != -1 {
+		t.Errorf("MaxRetries = %d, want -1 (retries disabled; 0 means the default 3)", opts.MaxRetries)
+	}
+	if !opts.ContextTimeoutEnabled {
+		t.Error("ContextTimeoutEnabled = false, want true (caller-derived deadline must reach Redis I/O)")
+	}
+	if opts.DialTimeout <= 0 || opts.ReadTimeout <= 0 || opts.WriteTimeout <= 0 {
+		t.Errorf("timeouts must be set explicitly, got dial=%v read=%v write=%v",
+			opts.DialTimeout, opts.ReadTimeout, opts.WriteTimeout)
+	}
+	if _, err := NewRedisClientOptions("not a redis url"); err == nil {
+		t.Error("invalid URL parsed without error")
 	}
 }
 

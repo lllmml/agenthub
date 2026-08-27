@@ -27,6 +27,41 @@ type RedisAgentCache struct {
 	ttl    time.Duration
 }
 
+// NewRedisClientOptions parses a redis:// URL and applies the client
+// configuration this project relies on for fast failure. It is a
+// separate function so main and the integration tests exercise the
+// exact same options instead of duplicating constants.
+//
+// The defaults this overrides matter: go-redis retries failed commands
+// up to 3 times by default (MaxRetries 0 means "use default") and, when
+// ContextTimeoutEnabled is false, runs socket reads/writes with
+// context.Background() instead of the caller's context. Both defaults
+// would let a dead Redis block the PostgreSQL fallback for seconds and
+// would swallow request cancellation, so neither can be left implicit.
+func NewRedisClientOptions(rawURL string) (*redis.Options, error) {
+	opts, err := redis.ParseURL(rawURL)
+	if err != nil {
+		return nil, err
+	}
+
+	// Single attempt per command: no hidden retries amplifying latency.
+	// -1 is the documented value that disables retries (0 means default 3).
+	opts.MaxRetries = -1
+
+	// Honor the caller-derived context deadline for dials and socket
+	// I/O instead of replacing the context with context.Background().
+	opts.ContextTimeoutEnabled = true
+
+	// Safety net timeouts for the case where no context deadline is
+	// present (e.g. the startup ping). The per-operation budget in the
+	// Service is the primary bound; these are fallbacks, not the budget.
+	opts.DialTimeout = 1 * time.Second
+	opts.ReadTimeout = 1 * time.Second
+	opts.WriteTimeout = 1 * time.Second
+
+	return opts, nil
+}
+
 // NewRedisAgentCache injects the application-level client and the TTL
 // applied to every cached Agent. The client is created once in main
 // and reused; caches never create one.

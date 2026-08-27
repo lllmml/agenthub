@@ -53,21 +53,27 @@ func (s *Service) GetByID(ctx context.Context, id string) (Agent, error) {
 	}
 	canonical := parsed.String()
 
-	// Cache-Aside step 1: try the cache. A hit avoids PostgreSQL.
-	a, err := s.cache.Get(ctx, canonical)
+	// Cache-Aside step 1: bounded cache read. The budget is a context
+	// derived from the caller's, so a canceled request cancels the
+	// cache operation too, and a slow/broken cache fails within
+	// cacheOpTimeout instead of blocking the PostgreSQL fallback.
+	cacheCtx, cacheCancel := context.WithTimeout(ctx, cacheOpTimeout)
+	defer cacheCancel()
+
+	a, err := s.cache.Get(cacheCtx, canonical)
 	if err == nil {
 		return a, nil
 	}
-	if !errors.Is(err, ErrCacheMiss) {
-		// Infrastructure failure (connection, timeout, corrupt
-		// payload): degrade performance, not correctness.
-		slog.Warn("agent cache read failed; falling back to repository", "agent_id", canonical, "error", err)
-	}
 
-	// The cache failure may itself be caused by the caller hanging up:
-	// do not start repository work the request no longer wants.
+	// The cache failure may be caused by the caller hanging up or its
+	// deadline expiring. That is not a Redis infrastructure problem:
+	// stop immediately, do not log a WARN, and do not start
+	// PostgreSQL work the request no longer wants.
 	if err := ctx.Err(); err != nil {
 		return Agent{}, err
+	}
+	if !errors.Is(err, ErrCacheMiss) {
+		slog.Warn("agent cache read failed; falling back to repository", "agent_id", canonical, "error", err)
 	}
 
 	// Cache-Aside step 2: load from the authoritative repository.
@@ -76,9 +82,23 @@ func (s *Service) GetByID(ctx context.Context, id string) (Agent, error) {
 		return Agent{}, err
 	}
 
-	// Cache-Aside step 3: fill the cache best-effort. A failed write
-	// must not turn a successful database read into a failed request.
-	if err := s.cache.Set(ctx, a); err != nil {
+	// Cache-Aside step 3: fill the cache best-effort with the same
+	// bounded, caller-derived budget. A failed write must never turn a
+	// successful database read into a failed request. The request may
+	// have been canceled while the database read was in flight, in
+	// which case the fill is pointless and skipped.
+	if ctx.Err() != nil {
+		return a, nil
+	}
+	setCtx, setCancel := context.WithTimeout(ctx, cacheOpTimeout)
+	defer setCancel()
+	if err := s.cache.Set(setCtx, a); err != nil {
+		// The parent context may have been canceled while Set was in
+		// flight: that is a canceled request, not a Redis failure, so
+		// it must not be reported as a cache infrastructure WARN.
+		if ctx.Err() != nil {
+			return a, nil
+		}
 		slog.Warn("agent cache write failed", "agent_id", a.ID, "error", err)
 	}
 	return a, nil

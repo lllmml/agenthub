@@ -17,6 +17,14 @@ var ErrCacheMiss = errors.New("cache miss")
 // mechanism for stale cached data.
 const DefaultCacheTTL = 5 * time.Minute
 
+// cacheOpTimeout is the total time budget for one cache operation (a
+// Get or a Set). Redis is a performance optimization: a slow or broken
+// cache must fail within this budget so the Service can fall back to
+// PostgreSQL instead of letting the request hang. The budget is applied
+// as a context derived from the caller's (context.WithTimeout(ctx, ...)),
+// so the caller's cancellation and deadline always win over it.
+const cacheOpTimeout = 250 * time.Millisecond
+
 // AgentCache is the caching abstraction in front of Repository. It is
 // a performance optimization only: PostgreSQL remains the source of
 // truth, and every cache implementation must fail safe (a miss or an
