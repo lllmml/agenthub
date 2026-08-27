@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lllmml/agenthub/internal/agent"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -52,9 +53,37 @@ func run() error {
 	}
 	cancel()
 
-	// Dependency wiring: PostgresRepository -> Service -> Handler -> ServeMux.
+	// Redis is optional and only a performance layer. An absent or
+	// broken REDIS_URL must never prevent startup: the cache degrades
+	// to a no-op and PostgreSQL keeps serving every request.
+	var cache agent.AgentCache = agent.NewNoopAgentCache()
+	if url := os.Getenv("REDIS_URL"); url != "" {
+		opts, err := agent.NewRedisClientOptions(url)
+		if err != nil {
+			slog.Warn("invalid REDIS_URL; Redis caching disabled", "error", err)
+		} else {
+			client := redis.NewClient(opts)
+
+			// Bounded startup connectivity check: unlike PostgreSQL,
+			// an unreachable Redis is a warning, not a failure.
+			pingCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			err := client.Ping(pingCtx).Err()
+			cancel()
+			if err != nil {
+				_ = client.Close()
+				slog.Warn("Redis unreachable at startup; Redis caching disabled, continuing with PostgreSQL", "error", err)
+			} else {
+				// LIFO defer ordering closes Redis before the pool.
+				defer client.Close()
+				cache = agent.NewRedisAgentCache(client, agent.DefaultCacheTTL)
+				slog.Info("Redis caching enabled", "addr", opts.Addr)
+			}
+		}
+	}
+
+	// Dependency wiring: Repository + Cache -> Service -> Handler -> ServeMux.
 	repo := agent.NewPostgresRepository(pool)
-	service := agent.NewService(repo)
+	service := agent.NewService(repo, cache)
 	handler := agent.NewHandler(service)
 
 	mux := http.NewServeMux()

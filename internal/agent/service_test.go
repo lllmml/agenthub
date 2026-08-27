@@ -10,7 +10,7 @@ import (
 )
 
 func TestServiceCreateBlankName(t *testing.T) {
-	svc := NewService(NewMemoryRepository())
+	svc := NewService(NewMemoryRepository(), NewNoopAgentCache())
 	for _, name := range []string{"", "   ", "\t\n"} {
 		_, err := svc.Create(context.Background(), CreateAgentInput{Name: name})
 		if !errors.Is(err, ErrInvalidAgentName) {
@@ -20,7 +20,7 @@ func TestServiceCreateBlankName(t *testing.T) {
 }
 
 func TestServiceCreateGeneratesUUIDAndTimestamp(t *testing.T) {
-	svc := NewService(NewMemoryRepository())
+	svc := NewService(NewMemoryRepository(), NewNoopAgentCache())
 	created, err := svc.Create(context.Background(), CreateAgentInput{Name: "paper-assistant", Description: "reads papers"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -34,7 +34,7 @@ func TestServiceCreateGeneratesUUIDAndTimestamp(t *testing.T) {
 }
 
 func TestServiceGetByIDNotFound(t *testing.T) {
-	svc := NewService(NewMemoryRepository())
+	svc := NewService(NewMemoryRepository(), NewNoopAgentCache())
 	_, err := svc.GetByID(context.Background(), uuid.NewString())
 	if !errors.Is(err, ErrAgentNotFound) {
 		t.Fatalf("err = %v, want ErrAgentNotFound", err)
@@ -79,7 +79,7 @@ func (s *spyRepository) List(ctx context.Context) ([]Agent, error) {
 
 func TestServiceGetByIDInvalidUUID(t *testing.T) {
 	spy := newSpyRepository()
-	svc := NewService(spy)
+	svc := NewService(spy, NewNoopAgentCache())
 
 	for _, id := range []string{"nope", "", "not-a-uuid", "12345", "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"} {
 		if _, err := svc.GetByID(context.Background(), id); !errors.Is(err, ErrAgentNotFound) {
@@ -93,7 +93,7 @@ func TestServiceGetByIDInvalidUUID(t *testing.T) {
 
 func TestServiceGetByIDValidUUIDReachesRepository(t *testing.T) {
 	spy := newSpyRepository()
-	svc := NewService(spy)
+	svc := NewService(spy, NewNoopAgentCache())
 
 	id := uuid.NewString()
 	if _, err := svc.GetByID(context.Background(), id); !errors.Is(err, ErrAgentNotFound) {
@@ -119,7 +119,7 @@ func TestServiceGetByIDNormalizesAlternateUUIDForms(t *testing.T) {
 	for name, form := range forms {
 		t.Run(name, func(t *testing.T) {
 			spy := newSpyRepository()
-			svc := NewService(spy)
+			svc := NewService(spy, NewNoopAgentCache())
 
 			if _, err := svc.GetByID(context.Background(), form); !errors.Is(err, ErrAgentNotFound) {
 				t.Fatalf("GetByID(%q) err = %v, want ErrAgentNotFound", form, err)

@@ -14,7 +14,7 @@ import (
 )
 
 func newTestHandler() *Handler {
-	return NewHandler(NewService(NewMemoryRepository()))
+	return NewHandler(NewService(NewMemoryRepository(), NewNoopAgentCache()))
 }
 
 // doRequest runs one request through the same route registration used
@@ -272,7 +272,7 @@ func (failingRepository) List(ctx context.Context) ([]Agent, error) {
 }
 
 func newFailingHandler() *Handler {
-	return NewHandler(NewService(failingRepository{}))
+	return NewHandler(NewService(failingRepository{}, NewNoopAgentCache()))
 }
 
 // assertSafeInternalError checks the generic, leak-free 500 contract:

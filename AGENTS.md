@@ -1,198 +1,1069 @@
 # AGENTS.md
 
-## Project: AgentHub — Day 2
+## Project: AgentHub
 
-AgentHub is a production-oriented AI backend project written in Go. Its long-term purpose is to demonstrate explainable, production-grade backend engineering for internship interviews and a resume.
+AgentHub is a production-oriented AI backend project written in Go.
 
-Day 1 is the working baseline:
+The long-term goal is to build a high-quality backend project that demonstrates real backend engineering skills and can be used as a strong internship/resume project.
 
-- standard-library `net/http` and modern `http.ServeMux` routes;
-- Handler → Service → Repository separation;
-- concurrency-safe `MemoryRepository`;
-- request-context propagation;
-- JSON responses and domain-to-HTTP error mapping;
-- graceful shutdown and tests.
+The project is intentionally developed incrementally.
 
-Day 2 changes one infrastructure boundary:
+Previous milestones established:
 
-> Replace runtime in-memory persistence with PostgreSQL while preserving the HTTP contract and domain boundaries.
-
-Optimize for understanding the complete database request path, not feature count.
-
-## Day 2 outcome
-
-By the end of Day 2, AgentHub must:
-
-- keep the existing endpoints and behaviors working;
-- persist Agents in PostgreSQL across process restarts;
-- use `github.com/jackc/pgx/v5` and `pgxpool`;
-- use explicit, parameterized SQL rather than an ORM;
-- manage schema with versioned up/down SQL migrations;
-- use UUID IDs that are safe across restarts and multiple instances;
-- propagate request contexts into database operations;
-- translate pgx errors into domain errors at the Repository boundary;
-- create one application-level connection pool and close it at shutdown;
-- include focused PostgreSQL integration tests;
-- document setup, migrations, running, testing, and persistence verification.
-
-Target path:
+### Day 1 — HTTP foundation
 
 ```text
-Client → net/http → Handler → Service → Repository interface
-       → PostgresRepository → pgxpool.Pool → PostgreSQL
+Client
+  ↓
+net/http
+  ↓
+ServeMux
+  ↓
+Handler
+  ↓
+Service
+  ↓
+Repository
 ```
 
-Handler and Service must not import or expose pgx types.
+Day 1 introduced:
 
-## Preserve Day 1 behavior
+* Go standard `net/http`;
+* modern `http.ServeMux`;
+* JSON APIs;
+* Handler → Service → Repository separation;
+* request `context.Context` propagation;
+* graceful HTTP shutdown;
+* concurrency-safe `MemoryRepository`;
+* unit and HTTP tests.
 
-Do not rewrite working Day 1 code without a concrete reason.
+### Day 2 — PostgreSQL persistence
+
+The runtime persistence layer was replaced with PostgreSQL while preserving the existing architecture:
+
+```text
+HTTP
+  ↓
+Handler
+  ↓
+Service
+  ↓
+Repository interface
+  ↓
+PostgresRepository
+  ↓
+pgxpool.Pool
+  ↓
+PostgreSQL
+```
+
+Day 2 introduced:
+
+* PostgreSQL as the runtime source of truth;
+* `pgxpool.Pool`;
+* SQL migrations;
+* `PostgresRepository`;
+* UUID Agent IDs;
+* `created_at`;
+* PostgreSQL integration tests;
+* mandatory `DATABASE_URL`;
+* fail-fast behavior when PostgreSQL is unavailable.
+
+Do not undo or bypass the Day 1 / Day 2 architecture.
+
+---
+
+# 1. Day 3 Goal
+
+Today's milestone introduces **Redis as a cache in front of PostgreSQL**.
+
+The goal is NOT to turn Redis into another database.
+
+The goal is to implement and understand the Cache-Aside pattern:
+
+```text
+GET /api/v1/agents/{id}
+             │
+             ▼
+           Service
+             │
+             ▼
+        Redis Cache
+         /       \
+       hit       miss
+       │           │
+       │           ▼
+       │       Repository
+       │           │
+       │           ▼
+       │      PostgreSQL
+       │           │
+       │           ▼
+       │       cache.Set
+       │           │
+       └───────────┴────→ return Agent
+```
+
+PostgreSQL remains the **Source of Truth**.
+
+Redis is only a performance optimization.
+
+If Redis becomes unavailable:
+
+```text
+Redis failure
+     ↓
+PostgreSQL
+     ↓
+request still succeeds
+```
+
+The system should experience degraded performance rather than unnecessary business downtime.
+
+This is **graceful degradation**.
+
+---
+
+# 2. Today's Required Outcome
+
+By the end of Day 3:
+
+* Redis can be started locally with Docker Compose;
+* the application can connect to Redis;
+* Agent caching is hidden behind an `AgentCache` abstraction;
+* `GET /api/v1/agents/{id}` uses Cache-Aside;
+* cache hit avoids PostgreSQL;
+* cache miss loads from PostgreSQL and fills Redis;
+* Redis failures fall back to PostgreSQL;
+* cache write failures do not fail otherwise-successful reads;
+* cached values have a TTL;
+* cache miss is distinguished from cache infrastructure failure;
+* request cancellation continues to propagate correctly;
+* Redis integration tests are available;
+* ordinary unit tests do not require Redis;
+* README documents the architecture and local setup.
+
+The public HTTP contract must remain unchanged.
+
+---
+
+# 3. Current API Contract Must Stay Unchanged
+
+Keep the existing endpoints:
+
+```text
+GET  /health
+
+GET  /api/v1/agents
+
+POST /api/v1/agents
+
+GET  /api/v1/agents/{id}
+```
+
+Do NOT add new API endpoints today.
+
+In particular, do NOT add:
+
+```text
+PUT    /api/v1/agents/{id}
+PATCH  /api/v1/agents/{id}
+DELETE /api/v1/agents/{id}
+```
+
+just to demonstrate cache invalidation.
+
+Cache invalidation will be introduced naturally when the business model actually supports mutation.
+
+Do not invent business features to justify infrastructure.
+
+---
+
+# 4. Important Scope Restrictions
+
+Do NOT add any of the following unless explicitly requested:
+
+* RabbitMQ;
+* Kafka;
+* NATS;
+* gRPC;
+* Kubernetes;
+* microservices;
+* Redis Cluster;
+* Redis Sentinel;
+* distributed locks;
+* Redlock;
+* rate limiting;
+* sessions;
+* background cache refresh;
+* write-behind caching;
+* write-through caching;
+* CDC;
+* Outbox Pattern;
+* cache invalidation workers;
+* `singleflight`;
+* negative caching;
+* caching the Agent list;
+* OpenTelemetry;
+* Prometheus;
+* Grafana;
+* authentication;
+* JWT;
+* Gin;
+* Echo;
+* Fiber;
+* ORM frameworks;
+* RAG;
+* pgvector;
+* LLM calls;
+* LangChain.
+
+Those concepts may appear in future milestones.
+
+Today is specifically about:
+
+```text
+Redis
++
+Cache Aside
++
+TTL
++
+failure handling
++
+context propagation
+```
+
+Keep the implementation small and explainable.
+
+---
+
+# 5. Preserve Day 2 PostgreSQL Behavior
+
+PostgreSQL remains mandatory for runtime operation.
 
 Keep:
 
 ```text
-GET  /health
-GET  /api/v1/agents
-POST /api/v1/agents
-GET  /api/v1/agents/{id}
+DATABASE_URL
 ```
 
-Preserve:
+mandatory.
 
-- JSON requests and responses;
-- malformed or trailing JSON returns `400 Bad Request`;
-- an empty or whitespace-only name returns `400 Bad Request`;
-- a missing Agent returns a JSON `404 Not Found`;
-- unexpected failures return a generic JSON `500` without internal details;
-- an empty list is `[]`, not `null`;
-- graceful shutdown;
-- Handler → Service → Repository dependency direction;
-- propagation of `r.Context()` through the entire request path.
+The server MUST NOT silently fall back to `MemoryRepository` if PostgreSQL is unavailable.
 
-Adding `created_at` to Agent responses is an intentional Day 2 contract change. Update affected tests and README examples coherently.
+Correct:
 
-## Scope restrictions
+```text
+PostgreSQL unavailable
+        ↓
+application startup fails
+```
 
-Approved new dependencies are limited to the smallest practical set for:
+because PostgreSQL stores authoritative application data.
 
-- PostgreSQL access with `github.com/jackc/pgx/v5`;
-- UUID generation with `github.com/google/uuid` or an equally small, justified package.
+Redis is different.
 
-Do not add unless explicitly requested:
+Correct:
 
-- GORM, Ent, Bun, SQLBoiler, sqlc, or another ORM/code generator;
-- a migration framework when plain SQL files are sufficient;
-- Gin, Echo, Fiber, or another web framework;
-- Docker or Docker Compose;
-- Redis, RabbitMQ, Kafka, gRPC, auth, JWT, or microservices;
-- OpenTelemetry, Prometheus, Grafana, an LLM SDK, or a vector database;
-- dependency-injection/configuration frameworks;
-- a generic database layer for multiple database engines.
+```text
+Redis unavailable
+       ↓
+cache disabled/degraded
+       ↓
+PostgreSQL still serves requests
+```
 
-Do not create or alter tables from application startup code. Schema deployment and application startup are separate responsibilities.
+This distinction is intentional and important.
 
-## Inspect before editing
+---
 
-Before changes:
+# 6. Target Architecture
 
-1. Read this file completely.
-2. Inspect the repository tree and `git status`.
-3. Read the Agent model, Repository, MemoryRepository, Service, Handler, tests, `main.go`, `go.mod`, and README.
-4. Run `go test ./...` once for a baseline.
-5. Identify the smallest coherent PostgreSQL change set.
+The desired architecture after Day 3 is:
 
-Adapt to the working code instead of assuming an earlier plan is exact. Preserve unrelated user changes.
+```text
+                    ┌──────────────┐
+                    │    Redis     │
+                    │    Cache     │
+                    └──────▲───────┘
+                           │
+                           │
+Client
+  │
+  ▼
+net/http
+  │
+  ▼
+Handler
+  │
+  ▼
+Service ───────────────────┘
+  │
+  ▼
+Repository interface
+  │
+  ▼
+PostgresRepository
+  │
+  ▼
+pgxpool.Pool
+  │
+  ▼
+PostgreSQL
+```
 
-## Target structure
+The important architectural rule is:
 
-Prefer the current domain-oriented layout:
+> Cache and Repository are different abstractions.
+
+Do NOT hide Redis inside `PostgresRepository`.
+
+Do NOT make PostgreSQL repository code know Redis exists.
+
+Do NOT put Redis operations in HTTP handlers.
+
+---
+
+# 7. Expected Project Structure
+
+Prefer extending the existing domain package rather than creating many new generic packages.
+
+A reasonable target is:
 
 ```text
 agenthub/
-├── cmd/server/main.go
+├── cmd/
+│   └── server/
+│       └── main.go
+│
 ├── internal/
 │   ├── agent/
 │   │   ├── model.go
 │   │   ├── repository.go
 │   │   ├── memory_repository.go
 │   │   ├── postgres_repository.go
-│   │   ├── postgres_repository_test.go
+│   │   ├── cache.go
+│   │   ├── redis_cache.go
 │   │   ├── service.go
-│   │   ├── service_test.go
 │   │   ├── handler.go
-│   │   └── handler_test.go
-│   └── httpx/response.go
+│   │   │
+│   │   ├── service_test.go
+│   │   ├── redis_cache_test.go
+│   │   └── ...
+│   │
+│   └── httpx/
+│       └── response.go
+│
 ├── migrations/
-│   ├── 000001_create_agents.up.sql
-│   └── 000001_create_agents.down.sql
+│   └── ...
+│
+├── compose.yaml
 ├── go.mod
 ├── go.sum
 ├── README.md
 └── AGENTS.md
 ```
 
-Minor deviations are acceptable when they fit the current code. Keep persistence close to the `agent` domain. Do not create generic `database`, `db`, `common`, `base`, or `utils` packages for one small helper.
+Minor deviations are acceptable when clearly justified.
 
-## Domain model and IDs
+Do not create packages named things such as:
 
-Extend the model:
+```text
+common
+utils
+manager
+helpers
+infrastructure
+core
+```
+
+without a strong reason.
+
+---
+
+# 8. Redis Dependency
+
+Use the official/common Go Redis client:
+
+```text
+github.com/redis/go-redis/v9
+```
+
+Do not introduce multiple Redis libraries.
+
+Do not introduce a caching framework.
+
+We want to understand Redis directly.
+
+---
+
+# 9. AgentCache Abstraction
+
+Create an Agent-specific cache abstraction.
+
+A reasonable shape is:
 
 ```go
-type Agent struct {
-    ID          string    `json:"id"`
-    Name        string    `json:"name"`
-    Description string    `json:"description"`
-    CreatedAt   time.Time `json:"created_at"`
+type AgentCache interface {
+    Get(ctx context.Context, id string) (Agent, error)
+    Set(ctx context.Context, agent Agent) error
 }
 ```
 
-Keep `CreateAgentInput` separate. Rules:
+The exact names may differ slightly if existing naming conventions suggest something better.
 
-- generate a UUID in Service before calling Repository;
-- keep ID as a string in the domain and JSON API;
-- remove the process-local atomic counter;
-- trim and validate name in Service;
-- allow an empty description;
-- do not expose pgx types in domain structs.
+Do NOT add methods that are not needed today.
 
-The Day 1 counter is unsafe after persistence: after restart it starts at zero while earlier IDs remain in PostgreSQL. It is also unsafe across multiple instances. Do not use `MAX(id)`, row counts, or a custom distributed ID generator.
+In particular, do not add:
 
-## Schema and migrations
-
-Create `migrations/000001_create_agents.up.sql` equivalent to:
-
-```sql
-CREATE TABLE agents (
-    id UUID PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT agents_name_not_blank CHECK (char_length(btrim(name)) > 0)
-);
+```go
+Delete(...)
+Invalidate(...)
+Flush(...)
+List(...)
+Lock(...)
 ```
 
-Create `migrations/000001_create_agents.down.sql` equivalent to:
+just because they might be useful later.
 
-```sql
-DROP TABLE agents;
+Interfaces should describe capabilities currently required by the consumer.
+
+---
+
+# 10. Cache Miss Must Be Explicit
+
+Define a domain/cache sentinel error for a normal cache miss.
+
+For example:
+
+```go
+var ErrCacheMiss = errors.New("cache miss")
 ```
 
-Requirements:
+The Redis implementation should translate:
 
-- use PostgreSQL `UUID` and `TIMESTAMPTZ`;
-- enforce a non-blank name in both Service and database;
-- rely on the primary-key index for ID lookups;
-- do not add speculative indexes;
-- keep migrations as versioned plain SQL and document `psql` usage;
-- mark the down migration as destructive;
-- do not use `CREATE TABLE IF NOT EXISTS` in application code;
-- never rewrite an already-applied migration for a later schema change; add the next version.
+```text
+redis.Nil
+```
 
-Service validation gives friendly errors. The database constraint is the last data-integrity defense. Both are intentional.
+into:
 
-## Repository contract
+```text
+ErrCacheMiss
+```
 
-Keep the interface independent of PostgreSQL. Change create coherently to return the persisted row:
+Callers must be able to distinguish:
+
+```text
+cache miss
+```
+
+from:
+
+```text
+Redis connection failure
+Redis timeout
+serialization failure
+other cache infrastructure error
+```
+
+Do NOT treat every Redis error as a cache miss.
+
+Do NOT compare error strings.
+
+Use:
+
+```go
+errors.Is(...)
+```
+
+where appropriate.
+
+---
+
+# 11. Redis Cache Key
+
+Use a stable namespaced key.
+
+For example:
+
+```text
+agenthub:agent:v1:{uuid}
+```
+
+Example:
+
+```text
+agenthub:agent:v1:550e8400-e29b-41d4-a716-446655440000
+```
+
+Reasons:
+
+* avoids collisions with unrelated Redis data;
+* identifies the application;
+* identifies the entity;
+* permits future key-format versioning.
+
+Do not use an unnecessarily complex key scheme.
+
+---
+
+# 12. Cache Serialization
+
+Store the cached Agent as JSON.
+
+The cached value must preserve at least:
+
+```go
+Agent{
+    ID
+    Name
+    Description
+    CreatedAt
+}
+```
+
+Use standard library:
+
+```go
+encoding/json
+```
+
+Do not introduce Protobuf, MessagePack, Gob, or another serialization layer today.
+
+If cached JSON cannot be decoded:
+
+* do not return corrupted data;
+* treat Redis as unusable for this read;
+* allow the Service to fall back to PostgreSQL;
+* optionally delete the corrupted key best-effort inside the Redis cache implementation if this remains simple.
+
+Do not allow malformed cached data to break the business request when PostgreSQL is still healthy.
+
+---
+
+# 13. TTL
+
+Cached Agent records MUST have a TTL.
+
+Use a simple default such as:
+
+```text
+5 minutes
+```
+
+A reasonable implementation is to inject the TTL into `RedisAgentCache` when constructing it.
+
+For example conceptually:
+
+```go
+NewRedisAgentCache(client, 5*time.Minute)
+```
+
+Do not create a complicated configuration framework.
+
+The TTL exists for more than memory management.
+
+It also provides a bounded recovery mechanism for stale cache data.
+
+Do not cache Agents forever.
+
+---
+
+# 14. Cache-Aside Read Flow
+
+Modify `Service.GetByID`.
+
+Preserve the existing UUID parsing and canonicalization behavior.
+
+The desired logical flow is:
+
+```text
+GetByID(ctx, id)
+
+        ↓
+
+parse UUID
+
+        ↓ invalid
+
+ErrAgentNotFound
+
+
+valid UUID
+
+        ↓
+
+cache.Get(ctx, canonicalID)
+
+     /             \
+   hit             miss
+    │                │
+ return          repo.GetByID
+                     │
+                     ▼
+                   Agent
+                     │
+                     ▼
+                 cache.Set
+                     │
+                     ▼
+                  return
+```
+
+More explicitly:
+
+```text
+1. Validate and normalize UUID.
+
+2. Attempt cache read.
+
+3. If cache hit:
+      return cached Agent.
+
+4. If ErrCacheMiss:
+      query Repository.
+
+5. If Redis infrastructure error:
+      log the cache problem;
+      continue to Repository.
+
+6. If Repository returns an Agent:
+      attempt to cache it.
+
+7. If cache.Set fails:
+      log the error;
+      still return the Agent.
+
+8. If Repository fails:
+      preserve the existing repository/domain error behavior.
+```
+
+PostgreSQL remains authoritative.
+
+---
+
+# 15. Request Cancellation Is More Important Than Cache Fallback
+
+Do not blindly do this:
+
+```text
+Redis error
+   ↓
+always query PostgreSQL
+```
+
+A Redis error may occur because the HTTP request has already been canceled.
+
+Before performing fallback work, respect:
+
+```go
+ctx.Err()
+```
+
+If the parent request context is canceled or has expired:
+
+```text
+Client disconnected
+        ↓
+request context canceled
+        ↓
+Redis operation stops
+        ↓
+do not start unnecessary PostgreSQL work
+```
+
+The implementation should preserve this principle.
+
+Never replace request context with:
+
+```go
+context.Background()
+```
+
+inside the HTTP → Service → Cache/Repository request path.
+
+Correct:
+
+```text
+r.Context()
+   ↓
+Service
+   ↓
+Cache
+```
+
+and:
+
+```text
+r.Context()
+   ↓
+Service
+   ↓
+Repository
+```
+
+---
+
+# 16. Redis Operations Should Be Bounded
+
+Redis is an optimization.
+
+A slow or broken cache should not make database-backed reads dramatically slower.
+
+Use reasonable bounded Redis operation behavior.
+
+If a cache-specific timeout is introduced, it MUST derive from the caller's context:
+
+```go
+cacheCtx, cancel := context.WithTimeout(ctx, ...)
+defer cancel()
+```
+
+Never:
+
+```go
+context.WithTimeout(context.Background(), ...)
+```
+
+for request-scoped operations.
+
+If a cache-specific timeout expires while the parent request context is still valid, PostgreSQL fallback is acceptable.
+
+Do not obsess over production timeout tuning today.
+
+The important concept is:
+
+> cache failure should fail fast enough to permit database fallback.
+
+---
+
+# 17. Graceful Degradation
+
+Redis MUST NOT become a hard dependency for serving Agent data.
+
+There are two failure situations to consider.
+
+## Redis unavailable during startup
+
+If Redis configuration exists but Redis cannot be reached:
+
+```text
+log warning
+    ↓
+disable/bypass cache
+    ↓
+continue startup with PostgreSQL
+```
+
+The server should still operate.
+
+A small no-op cache implementation is acceptable if it keeps dependency wiring explicit.
+
+For example conceptually:
+
+```text
+AgentCache
+    ▲
+    ├── RedisAgentCache
+    └── NoopAgentCache
+```
+
+Do not create a complicated cache provider framework.
+
+## Redis fails after startup
+
+If Redis was working and later becomes unavailable:
+
+```text
+cache.Get error
+       ↓
+log warning
+       ↓
+PostgreSQL fallback
+```
+
+and:
+
+```text
+PostgreSQL success
+       ↓
+cache.Set error
+       ↓
+log warning
+       ↓
+return PostgreSQL result anyway
+```
+
+Redis failure should degrade performance, not correctness.
+
+---
+
+# 18. Redis Configuration
+
+Prefer one simple environment variable:
+
+```text
+REDIS_URL
+```
+
+Example:
+
+```text
+redis://localhost:6379/0
+```
+
+Behavior:
+
+### `REDIS_URL` absent
+
+Redis caching is disabled.
+
+The server still starts normally.
+
+### `REDIS_URL` present and Redis reachable
+
+Enable Redis caching.
+
+### `REDIS_URL` present but Redis unreachable
+
+Log a clear warning and continue without startup failure.
+
+Do not commit credentials.
+
+Do not add secrets to source code.
+
+---
+
+# 19. Docker Compose
+
+Add a small:
+
+```text
+compose.yaml
+```
+
+for local Redis development.
+
+The Redis service should:
+
+* use the official Redis image;
+* expose port `6379`;
+* include a simple health check if practical;
+* be easy to start with:
+
+```bash
+docker compose up -d redis
+```
+
+and stop with:
+
+```bash
+docker compose down
+```
+
+Redis is being used as a cache, so do NOT add unnecessary persistence configuration today.
+
+Do not configure:
+
+* Redis Cluster;
+* Sentinel;
+* replication;
+* AOF tuning;
+* RDB tuning;
+* TLS;
+* ACL complexity.
+
+The goal is local development and integration testing.
+
+Do not unnecessarily rewrite the existing PostgreSQL development workflow as part of this milestone.
+
+---
+
+# 20. Do Not Cache List Today
+
+Keep:
+
+```text
+GET /api/v1/agents
+```
+
+using PostgreSQL through the existing Repository path.
+
+Do NOT cache:
+
+```text
+List()
+```
+
+today.
+
+List caching creates additional questions involving:
+
+```text
+creation invalidation
+pagination
+ordering
+staleness
+multi-key invalidation
+```
+
+Those are not today's learning objective.
+
+Only cache:
+
+```text
+GET /api/v1/agents/{id}
+```
+
+---
+
+# 21. Do Not Add Negative Caching Today
+
+If PostgreSQL returns:
+
+```text
+ErrAgentNotFound
+```
+
+do not cache that result today.
+
+Do not create:
+
+```text
+agenthub:agent:not-found:{id}
+```
+
+or similar entries.
+
+Negative caching can reduce database load but introduces additional consistency and TTL design issues.
+
+Defer it.
+
+---
+
+# 22. Do Not Add singleflight Today
+
+There is an important future problem:
+
+```text
+hot key expires
+      ↓
+many concurrent cache misses
+      ↓
+many PostgreSQL requests
+```
+
+This is Cache Stampede / Cache Breakdown.
+
+We will address this later with concepts such as:
+
+```text
+singleflight
+```
+
+Do NOT implement it today.
+
+The Day 3 implementation should leave the code in a state where `singleflight` could be introduced later without major architectural changes.
+
+---
+
+# 23. Logging
+
+Continue using Go standard library:
+
+```go
+log/slog
+```
+
+Useful cache logs include:
+
+```text
+cache hit
+cache miss
+cache read failed
+cache write failed
+Redis unavailable at startup
+Redis cache enabled
+```
+
+Use sensible log levels.
+
+For example:
+
+```text
+cache hit/miss       → Debug
+cache unavailable    → Warn
+cache operation fail → Warn
+```
+
+Do not log entire cached JSON payloads.
+
+Do not log credentials or Redis URLs containing passwords.
+
+Do not introduce Zap, Logrus, or another logging dependency.
+
+Do not build a logger abstraction framework today.
+
+---
+
+# 24. Service Responsibilities After Day 3
+
+The Service now coordinates application-level retrieval logic.
+
+Conceptually:
+
+```text
+Service
+ ├── validates Agent ID
+ ├── normalizes UUID
+ ├── checks AgentCache
+ ├── falls back to Repository
+ └── fills cache after DB read
+```
+
+The Service must still know nothing about:
+
+```text
+http.ResponseWriter
+HTTP status codes
+Redis command syntax
+pgx.Row
+SQL
+```
+
+The Service should depend on abstractions, not Redis client details.
+
+---
+
+# 25. RedisAgentCache Responsibilities
+
+`RedisAgentCache` should own Redis-specific details such as:
+
+* Redis keys;
+* `redis.Nil`;
+* Redis commands;
+* JSON serialization;
+* TTL;
+* Redis-specific error wrapping.
+
+It should NOT:
+
+* query PostgreSQL;
+* know about HTTP;
+* return HTTP status codes;
+* contain Agent business validation;
+* call the Repository;
+* generate Agent IDs.
+
+---
+
+# 26. Repository Responsibilities Must Stay Unchanged
+
+The Repository abstraction represents authoritative persistence.
+
+It should remain conceptually:
 
 ```go
 type Repository interface {
@@ -202,212 +1073,604 @@ type Repository interface {
 }
 ```
 
-Returning the row lets PostgreSQL remain the source of the `created_at` default. Update MemoryRepository, Service, and tests consistently. MemoryRepository may set `CreatedAt` when it receives a zero value so fast tests remain meaningful.
+Do not modify this interface just to add caching.
 
-The interface must not mention `pgxpool.Pool`, `pgx.Row`, SQL strings, or PostgreSQL error codes.
+Do not add Redis concepts to Repository.
 
-## PostgresRepository and SQL
+`PostgresRepository` should continue to be the only implementation that speaks SQL.
 
-Add:
+---
 
-```go
-type PostgresRepository struct {
-    pool *pgxpool.Pool
-}
+# 27. Creation Flow
 
-func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository
-```
+Do NOT complicate `Service.Create` today.
 
-Requirements:
-
-- inject the pool; never create one per request or method;
-- pass the received context to every pgx call;
-- use `$1`, `$2`, etc. for user-controlled values;
-- never concatenate user input into SQL;
-- explicitly list columns and scan into the domain model;
-- wrap unexpected errors with operation context and `%w`;
-- translate known infrastructure errors at this boundary;
-- close query rows and check `rows.Err()`;
-- do not use global database variables.
-
-Required SQL should be equivalent to:
-
-```sql
-INSERT INTO agents (id, name, description)
-VALUES ($1, $2, $3)
-RETURNING id, name, description, created_at;
-```
-
-```sql
-SELECT id, name, description, created_at
-FROM agents
-WHERE id = $1;
-```
-
-```sql
-SELECT id, name, description, created_at
-FROM agents
-ORDER BY created_at DESC, id DESC;
-```
-
-The ID tie-breaker makes ordering deterministic when timestamps match. Do not use `SELECT *`.
-
-## Error translation
-
-The rest of the application must not depend on pgx errors.
-
-```go
-if errors.Is(err, pgx.ErrNoRows) {
-    return Agent{}, ErrAgentNotFound
-}
-```
-
-Preserve this boundary:
+The authoritative flow remains:
 
 ```text
-pgx error → PostgresRepository translation → domain error
-          → Service → Handler → safe HTTP response
+POST /agents
+    ↓
+Service
+    ↓
+Repository
+    ↓
+PostgreSQL
 ```
 
-- map `pgx.ErrNoRows` to existing `ErrAgentNotFound`;
-- preserve `errors.Is` when wrapping;
-- never compare error strings;
-- never expose SQL, connection strings, PostgreSQL messages, or driver details;
-- unexpected failures become the existing generic `500` response;
-- do not build elaborate conflict handling for extremely unlikely UUID collisions.
+It is acceptable for the first subsequent GET to produce:
 
-## Pool lifecycle and wiring
+```text
+cache miss
+   ↓
+PostgreSQL
+   ↓
+cache fill
+```
+
+Do not add Redis to the write path merely for the sake of using Redis more often.
+
+---
+
+# 28. Tests Required
+
+Tests are a major part of this milestone.
+
+Ordinary tests must remain fast and must NOT require a running Redis instance.
+
+Use hand-written fakes/stubs where appropriate.
+
+Do not introduce a mocking framework unless there is a compelling existing reason.
+
+---
+
+## 28.1 Service: Cache Hit
+
+Test:
+
+```text
+cache contains Agent
+      ↓
+Service.GetByID
+      ↓
+returns cached Agent
+```
+
+Verify:
+
+* Repository `GetByID` is NOT called;
+* correct Agent is returned;
+* canonical UUID behavior is preserved.
+
+This proves Redis actually prevents database access.
+
+---
+
+## 28.2 Service: Cache Miss
+
+Test:
+
+```text
+cache.Get
+    ↓
+ErrCacheMiss
+    ↓
+Repository.GetByID
+    ↓
+Agent
+    ↓
+cache.Set
+    ↓
+return Agent
+```
+
+Verify:
+
+* Repository is called exactly as expected;
+* returned Agent comes from Repository;
+* cache Set receives the retrieved Agent.
+
+---
+
+## 28.3 Service: Redis Read Failure
+
+Simulate:
+
+```text
+cache.Get
+    ↓
+connection/timeout error
+```
+
+Verify:
+
+```text
+Repository.GetByID
+```
+
+is still called.
+
+If Repository succeeds, the Service should succeed.
+
+---
+
+## 28.4 Service: Redis Write Failure
+
+Simulate:
+
+```text
+cache miss
+    ↓
+Repository success
+    ↓
+cache.Set failure
+```
+
+Verify:
+
+* Service still returns the PostgreSQL Agent;
+* cache Set failure does not become a business failure.
+
+---
+
+## 28.5 Repository Failure
+
+If cache misses and Repository returns a real error:
+
+```text
+Service
+```
+
+must return that error.
+
+Redis must not hide PostgreSQL failure.
+
+---
+
+## 28.6 Agent Not Found
+
+Verify existing behavior remains:
+
+```text
+valid UUID
+    ↓
+cache miss
+    ↓
+Repository
+    ↓
+ErrAgentNotFound
+```
+
+returns:
+
+```text
+ErrAgentNotFound
+```
+
+to the Handler layer.
+
+Do not change the existing HTTP `404` contract.
+
+---
+
+## 28.7 Invalid UUID
+
+Existing Day 2 behavior must remain.
+
+For malformed IDs:
+
+```text
+Service.GetByID
+      ↓
+UUID validation fails
+      ↓
+ErrAgentNotFound
+```
+
+Verify malformed IDs do NOT result in unnecessary Redis or PostgreSQL operations.
+
+---
+
+## 28.8 Context Cancellation
+
+Add a test proving cancellation is respected.
+
+Conceptually:
+
+```text
+request context canceled
+        ↓
+cache operation fails/cancels
+        ↓
+Service does not start unnecessary DB work
+```
+
+At minimum, ensure canceled caller contexts are not silently replaced with `context.Background()`.
+
+---
+
+# 29. Redis Integration Tests
+
+Add focused integration tests for `RedisAgentCache`.
+
+Use an environment variable such as:
+
+```text
+TEST_REDIS_URL
+```
+
+Example:
+
+```bash
+export TEST_REDIS_URL='redis://localhost:6379/0'
+```
+
+If `TEST_REDIS_URL` is absent:
+
+```go
+t.Skip(...)
+```
+
+with a clear message.
+
+Integration tests may verify:
+
+### Set and Get
+
+```text
+Set Agent
+  ↓
+Get Agent
+  ↓
+equal values
+```
+
+including:
+
+```text
+ID
+Name
+Description
+CreatedAt
+```
+
+### Cache Miss
+
+Request a key that does not exist.
+
+Verify:
+
+```text
+ErrCacheMiss
+```
+
+using:
+
+```go
+errors.Is(...)
+```
+
+### TTL
+
+Use a short TTL in the test.
+
+Verify the key eventually expires.
+
+Keep the test reasonably fast and reliable.
+
+### Corrupt JSON
+
+Optional but valuable:
+
+* write malformed data directly using Redis;
+* call `RedisAgentCache.Get`;
+* verify corrupted data is not returned as a valid Agent.
+
+Integration tests MUST NOT flush a Redis instance indiscriminately if that could destroy unrelated developer data.
+
+Prefer unique key prefixes/UUIDs and cleanup only test-created keys.
+
+---
+
+# 30. Local Integration Test Workflow
+
+The following workflow should be documented and work:
+
+```bash
+docker compose up -d redis
+```
+
+Then:
+
+```bash
+export TEST_REDIS_URL='redis://localhost:6379/0'
+```
+
+Then:
+
+```bash
+go test -v ./internal/agent -run Redis
+```
+
+or the equivalent test command matching actual test names.
+
+Ordinary tests must continue working without Redis:
+
+```bash
+go test ./...
+```
+
+---
+
+# 31. Existing PostgreSQL Integration Tests Must Continue Working
+
+Do not weaken Day 2 database tests.
+
+Keep the existing safety rule that destructive PostgreSQL integration tests only operate against an explicitly dedicated `_test` database.
+
+Day 3 must not change this behavior.
+
+---
+
+# 32. Runtime Dependency Wiring
 
 `cmd/server/main.go` remains the composition root.
 
-Startup:
-
-1. read `DATABASE_URL`;
-2. fail clearly if missing;
-3. parse the pgxpool configuration;
-4. create one application-level pool;
-5. ping PostgreSQL using a bounded startup context;
-6. construct `PostgresRepository`;
-7. inject Repository → Service → Handler;
-8. start the existing HTTP server.
-
-Shutdown:
-
-1. stop accepting requests;
-2. drain in-flight requests within the existing timeout;
-3. close the pool;
-4. exit cleanly.
-
-Do not silently fall back to MemoryRepository when configuration or PostgreSQL is unavailable. Keep MemoryRepository for fast tests, but runtime must use PostgresRepository. Do not log `DATABASE_URL`.
-
-Use pgxpool defaults unless a small setting has a clear reason. If configuring `MaxConns`, document that total possible connections are approximately `service instances × MaxConns`. A pool provides reuse and bounds database concurrency; larger is not automatically better.
-
-## Context rules
-
-Preserve:
+Conceptually:
 
 ```text
-r.Context() → Handler → Service → PostgresRepository
-            → pool.QueryRow / pool.Query
+DATABASE_URL
+     ↓
+pgxpool.Pool
+     ↓
+PostgresRepository
+     │
+     │
+     ├──────────────┐
+     │              │
+     │          Redis config
+     │              ↓
+     │        Redis client
+     │              ↓
+     │        RedisAgentCache
+     │              │
+     └──────┐       │
+            ▼       ▼
+              Service
+                 ↓
+               Handler
+                 ↓
+              ServeMux
+                 ↓
+            http.Server
 ```
 
-- do not replace request context with `context.Background()`;
-- do not create unrelated contexts inside Repository methods;
-- return cancellation/deadline errors promptly;
-- use a separate bounded context only for startup operations.
+Dependencies should be constructed explicitly.
 
-## Health endpoint
+Avoid global mutable clients.
 
-Keep `GET /health` as simple process liveness:
+Create one application-level PostgreSQL pool.
 
-```json
-{"status":"ok"}
-```
+Create at most one application-level Redis client.
 
-Check database availability during startup. Do not add a full liveness/readiness subsystem in Day 2.
+Reuse them across requests.
 
-## Fast tests
+Close resources during application shutdown.
 
-Keep unit and HTTP tests independent of PostgreSQL. Use MemoryRepository or a small domain fake to test:
+---
 
-- blank-name validation;
-- generated IDs are parseable UUIDs;
-- create/list/get behavior;
-- Handler status codes and JSON;
-- missing Agent maps to `404`;
-- unexpected Repository errors map to `500` without leaks;
-- `created_at` is meaningful without exact-time assertions.
+# 33. Redis Startup Behavior
 
-Do not mock pgx internals for Service or Handler tests.
-
-## PostgreSQL integration tests
-
-Test PostgresRepository against a real, dedicated test database selected only by:
+If:
 
 ```text
-TEST_DATABASE_URL
+REDIS_URL
 ```
 
-Rules:
+is configured, perform a bounded startup connectivity check.
 
-- when absent, skip only integration tests with a clear message;
-- ordinary tests must still run;
-- never use `DATABASE_URL` for destructive test cleanup;
-- require/apply the Day 2 schema before tests;
-- clean only data in the dedicated test database;
-- keep isolation explicit and avoid timing-based sleeps;
-- report whether these tests ran or were skipped.
+Do NOT allow Redis Ping to hang startup indefinitely.
 
-At minimum, test:
+Example conceptually:
 
-- create returns the row with non-zero `created_at`;
-- get returns the correct Agent;
-- list has deterministic newest-first order;
-- missing UUID becomes `ErrAgentNotFound` through `errors.Is`;
-- the database rejects a blank name when Service is bypassed;
-- cancellation reaches a database call where reliably testable.
+```text
+small timeout context
+       ↓
+PING Redis
+```
 
-## README requirements
+If successful:
+
+```text
+enable Redis cache
+```
+
+If unsuccessful:
+
+```text
+log warning
+close unusable client if appropriate
+use disabled/no-op cache
+continue startup
+```
+
+Do not call:
+
+```text
+os.Exit
+```
+
+just because Redis is unavailable.
+
+PostgreSQL startup failure and Redis startup failure intentionally have different semantics.
+
+---
+
+# 34. Resource Lifecycle
+
+During graceful shutdown:
+
+```text
+HTTP server stops accepting requests
+        ↓
+in-flight HTTP requests drain
+        ↓
+Redis client closes
+        ↓
+PostgreSQL pool closes
+```
+
+Exact `defer` ordering may differ if correct.
+
+Do not introduce resource leaks.
+
+Do not create a Redis client per HTTP request.
+
+Do not create a PostgreSQL pool per HTTP request.
+
+---
+
+# 35. Error Design
+
+Continue using sentinel/domain errors where appropriate.
+
+At minimum there should be a clear distinction between:
+
+```text
+ErrAgentNotFound
+ErrInvalidAgentName
+ErrCacheMiss
+```
+
+Infrastructure errors should be wrapped with context using:
+
+```go
+fmt.Errorf("...: %w", err)
+```
+
+where useful.
+
+Do not expose Redis implementation errors directly in HTTP responses.
+
+A Redis outage should normally never reach the Handler as a user-facing failure when PostgreSQL successfully serves the request.
+
+---
+
+# 36. HTTP Behavior Must Not Change
+
+Existing handler tests should continue to pass.
+
+Examples:
+
+```text
+GET /health
+```
+
+still returns `200`.
+
+```text
+POST /api/v1/agents
+```
+
+still returns `201`.
+
+```text
+GET /api/v1/agents/{valid-id}
+```
+
+still returns `200` when the Agent exists.
+
+Missing Agent still produces the existing JSON `404`.
+
+Redis must remain invisible to API consumers.
+
+---
+
+# 37. README Requirements
+
+Update README with a concise Day 3 section.
+
+Explain the new request path:
+
+```text
+Client
+  -> Handler
+  -> Service
+  -> Redis
+       hit  -> return
+       miss -> PostgreSQL -> Redis fill -> return
+```
 
 Document:
 
-- the PostgreSQL milestone and prerequisites: Go, PostgreSQL, `psql`;
-- creating/selecting a local database;
-- placeholder `DATABASE_URL` configuration;
-- applying the up migration and destructive down migration;
-- running the server and ordinary tests;
-- integration tests with `TEST_DATABASE_URL`;
-- why runtime uses PostgresRepository while fast tests use MemoryRepository;
-- manual persistence proof: create an Agent, restart the process against the same database, then fetch it.
+### Redis role
 
-Local-only example:
+Explain clearly:
 
-```bash
-export DATABASE_URL='postgres://agenthub:agenthub@localhost:5432/agenthub?sslmode=disable'
+> Redis is a cache, not the source of truth.
+
+### PostgreSQL role
+
+Explain clearly:
+
+> PostgreSQL remains authoritative persistent storage.
+
+### Environment variables
+
+Document:
+
+```text
+DATABASE_URL
+REDIS_URL
+TEST_DATABASE_URL
+TEST_REDIS_URL
 ```
 
-Never commit credentials or secret `.env` files. Do not use `sslmode=disable` outside clearly local examples.
+with safe local examples.
 
-## Implementation order
+### Start Redis
 
-1. Inspect code and establish a test baseline.
-2. Add `CreatedAt` and update the Repository create contract.
-3. Replace the atomic counter with UUIDs.
-4. Update MemoryRepository and fast tests.
-5. Add up/down migrations.
-6. Add PostgresRepository and explicit SQL.
-7. Add error translation.
-8. Add integration tests.
-9. Wire `DATABASE_URL`, startup ping, pool, and repository in `main.go`.
-10. Preserve graceful shutdown and close the pool.
-11. Update HTTP tests and README.
-12. Run quality gates and review the diff.
+```bash
+docker compose up -d redis
+```
 
-Do not begin by rewriting handlers or adding unrelated infrastructure.
+### Run server with Redis
 
-## Quality gates
+Example:
 
-Before declaring completion, run:
+```bash
+export DATABASE_URL='...'
+export REDIS_URL='redis://localhost:6379/0'
+
+go run ./cmd/server
+```
+
+### Run ordinary tests
+
+```bash
+go test ./...
+```
+
+### Run Redis integration tests
+
+Document the actual command.
+
+### Graceful degradation
+
+Explain:
+
+```text
+Redis unavailable
+    ↓
+PostgreSQL fallback
+```
+
+Do not turn README into a giant Redis tutorial.
+
+---
+
+# 38. Quality Gates
+
+Before considering the milestone complete, run:
 
 ```bash
 go mod tidy
@@ -417,68 +1680,471 @@ go test ./...
 go test -race ./...
 ```
 
-Also run integration tests with `TEST_DATABASE_URL` when available. Report exact commands and outcomes; never claim skipped tests passed.
+All ordinary tests should pass without requiring Redis or PostgreSQL integration-test environment variables.
 
-## Coding and safety rules
+When a test Redis instance is available, also run the Redis integration tests.
 
-Prefer idiomatic Go, small functions, explicit constructors, direct SQL near Repository methods, early returns, `%w`, `errors.Is`, table-driven tests where useful, `t.Cleanup`, deterministic data, and comments that explain why.
+If PostgreSQL integration-test configuration is available, ensure existing PostgreSQL tests still pass.
 
-Avoid global pools, generic base repositories, a query builder for three statements, interfaces wrapping every pgx type, `SELECT *`, SQL concatenation, swallowed `rows.Err()`, duplicate logging at every layer, panics for expected startup errors, sleeps in tests, and transaction abstractions for single-statement operations.
+Do not declare completion while known test failures remain.
 
-Never expose/log credentials or database internals. Never run a down migration or destructive cleanup against an unidentified database. Preserve unrelated user changes.
+---
 
-## Definition of done
+# 39. Suggested Implementation Order
 
-- [ ] Existing endpoints and error contracts still work.
-- [ ] Runtime persistence uses PostgreSQL; fast tests may retain MemoryRepository.
-- [ ] IDs are UUIDs and JSON contains `created_at`.
-- [ ] Versioned up/down migrations exist.
-- [ ] Schema uses UUID primary key, `TIMESTAMPTZ`, and constraints.
-- [ ] PostgresRepository implements the domain interface.
-- [ ] SQL is explicit, parameterized, and lists columns.
-- [ ] List ordering is deterministic.
-- [ ] `pgx.ErrNoRows` becomes `ErrAgentNotFound`.
-- [ ] Unexpected database errors never leak to clients.
-- [ ] Request context reaches every database operation.
-- [ ] One pool is created, pinged with a timeout, and closed at shutdown.
-- [ ] Missing/invalid database configuration fails clearly with no memory fallback.
-- [ ] Fast tests remain database-independent.
-- [ ] PostgreSQL integration tests exist and skips are reported honestly.
-- [ ] README covers setup, migrations, tests, and restart persistence.
-- [ ] tidy, format, vet, tests, and race tests pass.
-- [ ] No ORM, Docker, cache, queue, auth, observability stack, or unrelated framework was added.
+Follow this order unless existing code strongly suggests otherwise.
 
-## Learning checkpoint
+## Step 1
 
-Keep the result simple enough to explain:
+Inspect the current repository thoroughly.
 
-- why PostgreSQL data survives process restart;
-- PostgreSQL Server vs TCP connection vs `pgx.Conn` vs `pgxpool.Pool`;
-- pool reuse and concurrency limits;
-- why the Day 1 atomic ID fails after persistence and why UUID fixes it;
-- table, row, column, primary key, constraint, index, and migration;
-- why migrations version schema changes;
-- why Handler and Service do not import pgx;
-- why `pgx.ErrNoRows` becomes a domain error;
-- why request context reaches pgx;
-- why list SQL needs `ORDER BY`;
-- why MemoryRepository remains useful in tests;
-- when a multi-statement workflow requires a transaction;
-- what GORM automates and why Day 2 intentionally uses direct SQL.
+Read at minimum:
 
-## Required final report
+```text
+internal/agent/model.go
+internal/agent/repository.go
+internal/agent/postgres_repository.go
+internal/agent/memory_repository.go
+internal/agent/service.go
+internal/agent/service_test.go
+internal/agent/handler.go
+cmd/server/main.go
+README.md
+go.mod
+migrations/
+```
 
-The coding agent must summarize:
+Do not code based only on this document.
 
-- files changed and behavior implemented;
-- Repository, schema, SQL, and error-mapping decisions;
-- exact validation commands and results;
-- whether integration tests actually ran or were skipped;
-- remaining setup or blockers;
-- any deliberate deviation and its reason.
+The repository is the source of truth for current implementation details.
 
-If PostgreSQL or `TEST_DATABASE_URL` is unavailable, complete database-independent work, leave integration tests runnable, and report the limitation precisely. Never fabricate results.
+## Step 2
 
-Day 2 milestone:
+Add the Redis dependency.
 
-> A clean PostgreSQL persistence layer that proves the Repository boundary, survives process restarts, propagates cancellation, preserves the HTTP contract, and remains small enough to explain line by line.
+## Step 3
+
+Define:
+
+```text
+AgentCache
+ErrCacheMiss
+```
+
+## Step 4
+
+Implement `RedisAgentCache`.
+
+Include:
+
+```text
+Get
+Set
+JSON serialization
+TTL
+Redis Nil translation
+error wrapping
+```
+
+## Step 5
+
+Add small fake cache implementations inside service tests.
+
+## Step 6
+
+Modify `Service` dependency injection to accept the cache abstraction.
+
+## Step 7
+
+Implement Cache-Aside in:
+
+```text
+Service.GetByID
+```
+
+while preserving UUID normalization.
+
+## Step 8
+
+Add service tests for:
+
+```text
+hit
+miss
+Redis failure
+cache Set failure
+repository failure
+invalid UUID
+context cancellation
+```
+
+## Step 9
+
+Add Redis integration tests.
+
+## Step 10
+
+Add local Redis Docker Compose configuration.
+
+## Step 11
+
+Wire Redis in `cmd/server/main.go`.
+
+## Step 12
+
+Implement startup degradation behavior.
+
+## Step 13
+
+Review graceful shutdown/resource closing.
+
+## Step 14
+
+Update README.
+
+## Step 15
+
+Run all quality gates.
+
+## Step 16
+
+Review the final diff and remove unnecessary complexity.
+
+---
+
+# 40. Learning-Oriented Requirements
+
+This is a learning project.
+
+The code should make the following flow easy to explain during a backend interview:
+
+```text
+HTTP request
+    ↓
+r.Context()
+    ↓
+Handler
+    ↓
+Service
+    ↓
+validate UUID
+    ↓
+Redis cache
+  /        \
+hit        miss/error
+ │             │
+ │             ▼
+ │       Repository
+ │             ↓
+ │       PostgreSQL
+ │             ↓
+ │        cache fill
+ │             │
+ └─────────────┘
+        ↓
+    JSON response
+```
+
+The resulting implementation should make it possible to clearly answer:
+
+1. Why is PostgreSQL the Source of Truth?
+
+2. Why is Redis not treated as the primary database?
+
+3. What is Cache-Aside?
+
+4. What is a cache hit?
+
+5. What is a cache miss?
+
+6. Why must `redis.Nil` be different from a Redis connection error?
+
+7. Why can Redis failure fall back to PostgreSQL?
+
+8. Why should PostgreSQL startup failure still fail the application?
+
+9. Why does cached data need a TTL?
+
+10. Why are Redis keys namespaced?
+
+11. Why should malformed UUIDs be rejected before accessing cache/storage?
+
+12. Why must `context.Context` propagate into Redis?
+
+13. Why shouldn't a canceled request continue querying PostgreSQL?
+
+14. Why don't we cache `List()` yet?
+
+15. What is Cache Stampede, even though we are not solving it today?
+
+16. Where could `singleflight` be introduced later?
+
+17. Why shouldn't Redis logic live inside `PostgresRepository`?
+
+18. Why shouldn't handlers know whether Redis exists?
+
+If the implementation makes these questions difficult to answer, reconsider the architecture.
+
+---
+
+# 41. Coding Style
+
+Follow idiomatic Go.
+
+Prefer:
+
+* small functions;
+* explicit dependency injection;
+* early returns;
+* `errors.Is`;
+* `%w` error wrapping;
+* interfaces near their consumer;
+* standard library where practical;
+* `log/slog`;
+* table-driven tests when useful;
+* request context propagation;
+* small focused test fakes;
+* clear ownership of resources.
+
+Avoid:
+
+* dependency injection frameworks;
+* global mutable clients;
+* huge constructors;
+* generic repository frameworks;
+* reflection-heavy abstractions;
+* premature generics;
+* giant `utils` packages;
+* meaningless interfaces;
+* duplicated serialization code;
+* hidden retries;
+* magic fallback behavior.
+
+Comments should explain **why**, not simply restate what the code does.
+
+---
+
+# 42. Git Safety
+
+Do not:
+
+* merge branches;
+* rebase branches;
+* force push;
+* rewrite Git history;
+* delete branches;
+* push directly to remote;
+* create commits unless explicitly asked.
+
+Only modify the working tree required for this milestone.
+
+Leave branch/PR/merge decisions to the user unless explicitly instructed otherwise.
+
+---
+
+# 43. Explicit Non-Goals for Day 3
+
+The following are intentionally deferred:
+
+```text
+Agent update API
+Agent delete API
+cache invalidation
+double delete
+distributed cache consistency
+singleflight
+cache stampede protection
+cache penetration protection
+negative caching
+Bloom filters
+rate limiting
+distributed locks
+Redis Streams
+Redis Pub/Sub
+Redis Cluster
+Redis Sentinel
+RabbitMQ
+Kafka
+LLM Gateway
+SSE streaming
+RAG
+OpenTelemetry
+Prometheus
+Grafana
+Kubernetes
+microservices
+```
+
+Do not implement them.
+
+It is acceptable to mention them briefly in comments or README only when necessary to explain a deliberate limitation.
+
+---
+
+# 44. Definition of Done
+
+Day 3 is complete only when all of the following are true:
+
+* [ ] Existing Day 1 HTTP behavior still works.
+* [ ] Existing Day 2 PostgreSQL persistence still works.
+* [ ] PostgreSQL remains the runtime source of truth.
+* [ ] `DATABASE_URL` remains mandatory.
+* [ ] Redis support uses a single clear client dependency.
+* [ ] Redis can be started locally via Docker Compose.
+* [ ] Redis configuration is provided through environment variables.
+* [ ] Missing Redis configuration does not prevent server startup.
+* [ ] Redis startup failure does not prevent server startup.
+* [ ] `AgentCache` exists as a separate abstraction from `Repository`.
+* [ ] `RedisAgentCache` implements `AgentCache`.
+* [ ] Cache keys are namespaced.
+* [ ] Cached Agents use JSON serialization.
+* [ ] Cached Agents have a TTL.
+* [ ] Redis `nil`/missing key maps to `ErrCacheMiss`.
+* [ ] Cache miss is distinguished from Redis infrastructure failure.
+* [ ] `Service.GetByID` preserves UUID parsing/normalization.
+* [ ] Cache hit avoids Repository access.
+* [ ] Cache miss queries Repository.
+* [ ] Successful database reads fill Redis best-effort.
+* [ ] Redis read failure falls back to PostgreSQL.
+* [ ] Redis write failure does not fail a successful database read.
+* [ ] Caller cancellation is respected.
+* [ ] Request context is propagated into Redis operations.
+* [ ] `GET /api/v1/agents` is NOT cached.
+* [ ] Agent not-found results are NOT negatively cached.
+* [ ] No new update/delete HTTP API was added.
+* [ ] No `singleflight` was added.
+* [ ] Ordinary unit tests run without Redis.
+* [ ] Service tests cover cache hit.
+* [ ] Service tests cover cache miss.
+* [ ] Service tests cover Redis read failure.
+* [ ] Service tests cover Redis write failure.
+* [ ] Service tests preserve existing not-found behavior.
+* [ ] Service tests preserve invalid UUID behavior.
+* [ ] Redis integration tests are available.
+* [ ] Redis integration tests skip clearly when `TEST_REDIS_URL` is absent.
+* [ ] Existing PostgreSQL integration-test safety behavior remains intact.
+* [ ] Redis resources are closed correctly.
+* [ ] PostgreSQL resources are still closed correctly.
+* [ ] README explains Cache-Aside.
+* [ ] README explains PostgreSQL vs Redis responsibility.
+* [ ] README documents local Redis setup.
+* [ ] `go mod tidy` succeeds.
+* [ ] `go fmt ./...` succeeds.
+* [ ] `go vet ./...` succeeds.
+* [ ] `go test ./...` succeeds.
+* [ ] `go test -race ./...` succeeds.
+* [ ] No unrelated infrastructure was introduced.
+* [ ] No unnecessary business features were added.
+
+---
+
+# 45. Final Coding Agent Response
+
+After implementation, do NOT only say:
+
+```text
+Done.
+```
+
+Provide a concise engineering summary containing:
+
+## Files changed
+
+List meaningful created/modified files.
+
+## Architecture change
+
+Explain the new flow:
+
+```text
+Service
+  ├── AgentCache → Redis
+  └── Repository → PostgreSQL
+```
+
+## Cache behavior
+
+Explain:
+
+```text
+hit
+miss
+Redis failure
+TTL
+```
+
+## Context behavior
+
+Explain how caller cancellation propagates through Redis and PostgreSQL operations.
+
+## Tests run
+
+List the exact commands actually executed.
+
+Do not claim an integration test passed if it was skipped because Redis/PostgreSQL was unavailable.
+
+Clearly distinguish:
+
+```text
+PASS
+SKIPPED
+NOT RUN
+```
+
+## Remaining limitations
+
+Mention important intentionally deferred concerns such as:
+
+```text
+cache invalidation
+cache stampede
+singleflight
+```
+
+without implementing them.
+
+---
+
+# 46. Final Principle
+
+When choosing between:
+
+```text
+a simple implementation whose behavior can be clearly explained
+```
+
+and:
+
+```text
+a more "enterprise" implementation with many abstractions
+```
+
+choose the first one.
+
+The purpose of Day 3 is not to prove that Redis can be added to a `go.mod`.
+
+The purpose is to understand this engineering progression:
+
+```text
+PostgreSQL handles every read
+          ↓
+repeated hot reads create unnecessary DB load
+          ↓
+introduce Redis Cache
+          ↓
+cache miss vs cache failure must be distinguished
+          ↓
+Redis itself can fail
+          ↓
+graceful degradation
+          ↓
+cached data can become stale
+          ↓
+TTL bounds stale state
+          ↓
+hot keys can later create Cache Stampede
+          ↓
+future milestone: singleflight / stronger cache strategy
+```
+
+Keep every change aligned with that learning goal.

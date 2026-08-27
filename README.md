@@ -6,32 +6,67 @@ engineering.
 
 ## Current Milestone
 
-Day 2: a PostgreSQL persistence layer behind the existing HTTP API. The
-Handler -> Service -> Repository separation is preserved; only the
-Repository implementation changed from in-memory to PostgreSQL, so agents
-survive process restarts.
+Day 3: a Redis cache in front of the Day 2 PostgreSQL persistence
+layer, using the Cache-Aside pattern. The HTTP contract is unchanged;
+PostgreSQL remains the source of truth and Redis only speeds up
+`GET /api/v1/agents/{id}`.
 
-Request path:
+Request path for a single agent read:
 
 ```text
-Client -> net/http -> Handler -> Service -> Repository interface
-       -> PostgresRepository -> pgxpool.Pool -> PostgreSQL
+Client -> Handler -> Service
+                      |
+                      +-- Redis cache -------- hit -> return
+                      |        |
+                      |      miss/error
+                      |        v
+                      +--> Repository -> PostgreSQL -> cache fill -> return
 ```
 
-Endpoints (HTTP contract unchanged from Day 1):
+Endpoints (HTTP contract unchanged from Day 1/2):
 
 - `GET /health`
 - `GET /api/v1/agents`
 - `POST /api/v1/agents`
 - `GET /api/v1/agents/{id}`
 
-Agents now carry a server-supplied `created_at` and a UUID `id`, both
-produced by PostgreSQL/Service instead of a process-local counter.
+Only `GET /api/v1/agents/{id}` is cached. The list endpoint and
+creation still go straight to PostgreSQL.
+
+### Redis role
+
+Redis is a cache, **not** the source of truth. It holds JSON copies of
+agents under namespaced keys (`agenthub:agent:v1:{uuid}`) with a
+5-minute TTL.
+
+### PostgreSQL role
+
+PostgreSQL remains authoritative persistent storage. Every cache miss
+loads from it, and every successful database read refills the cache
+best-effort.
+
+### Graceful degradation
+
+Redis is optional. If `REDIS_URL` is absent, invalid, or unreachable,
+the server logs a warning and continues with caching disabled
+(PostgreSQL serves every read):
+
+```text
+Redis unavailable
+    |
+PostgreSQL fallback
+```
+
+A cache read or write failure never turns a successful database read
+into a failed request. PostgreSQL startup failure, in contrast, still
+fails the application — PostgreSQL holds authoritative data, Redis does
+not.
 
 ## Prerequisites
 
 - Go 1.26+
 - PostgreSQL (server) and `psql` (client)
+- Docker (optional, for the local Redis instance)
 
 ## Setup
 
@@ -71,6 +106,38 @@ export TEST_DATABASE_URL='postgres://agenthub:<your-password>@localhost:5432/age
 The examples use `sslmode=disable`, which is only appropriate for local
 development. Never commit real credentials.
 
+### Start Redis
+
+Redis is optional and used only as a cache:
+
+```bash
+docker compose up -d redis
+```
+
+Stop it with:
+
+```bash
+docker compose down
+```
+
+### Environment variables
+
+| Variable          | Required | Purpose                                   |
+| ----------------- | -------- | ----------------------------------------- |
+| `DATABASE_URL`    | yes      | PostgreSQL connection string              |
+| `REDIS_URL`       | no       | Redis connection string; absent disables caching |
+| `TEST_DATABASE_URL` | tests  | dedicated `_test` PostgreSQL database     |
+| `TEST_REDIS_URL`  | tests    | Redis instance for integration tests      |
+
+Safe local examples:
+
+```bash
+export DATABASE_URL='postgres://agenthub:<your-password>@localhost:5432/agenthub?sslmode=disable'
+export REDIS_URL='redis://localhost:6379/0'
+export TEST_DATABASE_URL='postgres://agenthub:<your-password>@localhost:5432/agenthub_test?sslmode=disable'
+export TEST_REDIS_URL='redis://localhost:6379/0'
+```
+
 ### Migrations
 
 Schema is managed as versioned plain SQL in `migrations/`. Apply the up
@@ -97,6 +164,13 @@ go run ./cmd/server
 
 The server fails fast with a clear error if `DATABASE_URL` is missing or
 PostgreSQL is unreachable — it never falls back to in-memory storage.
+With Redis configured (and reachable) the cache is enabled:
+
+```bash
+export REDIS_URL='redis://localhost:6379/0'
+go run ./cmd/server
+```
+
 The server listens on `:8080`; override with `PORT` if needed:
 
 ```bash
@@ -104,11 +178,13 @@ PORT=8083 go run ./cmd/server
 ```
 
 On `SIGINT`/`SIGTERM` the server stops accepting requests, drains
-in-flight requests, then closes the connection pool.
+in-flight requests, then closes the Redis client and the connection
+pool.
 
 ## How to Test
 
-Ordinary tests are database-independent (they use MemoryRepository):
+Ordinary tests are database- and Redis-independent (they use
+MemoryRepository and fake caches):
 
 ```bash
 go test ./...
@@ -125,10 +201,21 @@ export TEST_DATABASE_URL='postgres://agenthub:<your-password>@localhost:5432/age
 go test -v ./internal/agent/ -run TestPostgresRepository
 ```
 
+Redis integration tests exercise `RedisAgentCache` against a real
+Redis selected only by `TEST_REDIS_URL`; they skip when it is unset:
+
+```bash
+docker compose up -d redis
+export TEST_REDIS_URL='redis://localhost:6379/0'
+go test -v ./internal/agent -run Redis
+```
+
 Why two repositories? Runtime uses PostgresRepository because agents
 must survive restarts and be shared across instances. Fast tests use
 MemoryRepository so unit/HTTP tests run instantly with no database and
 no pgx mocking. The Repository interface keeps both interchangeable.
+The same applies to caching: runtime uses `RedisAgentCache` (or a
+no-op when Redis is unavailable); tests use small fakes.
 
 ## Example Requests
 
